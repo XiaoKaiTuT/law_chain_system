@@ -1,0 +1,20 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE 配置
+.idea/
+
+# 日志
+logs/
+
+# 模型文件（太大，GitHub 限制 100MB）
+rag_qa/models/
+
+# 环境变量
+*.env
+
+# 数据文件（如果太大）
+*.pdf
+*.docx
