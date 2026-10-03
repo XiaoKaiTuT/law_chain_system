@@ -220,7 +220,19 @@
         .msg.user .avatar-img { display: none; }
         .welcome .welcome-portrait .avatar-img { object-position: 50% 22%; }
 
-        .msg-body { max-width: min(72%, 640px); display: flex; flex-direction: column; gap: 5px; }
+        /* 宽度策略：
+           .msg-body 用 fit-content 而非 auto —— 否则 flex 子项会按 min-content 收缩，
+           配合任何「任意处断行」属性就会塌成"每列一个字"。
+           .bubble 不再设 min-width：那会把「正在思考」的三点气泡也撑成长条（已踩过这个坑），
+           改为 width: 100% 占满 .msg-body，由 .msg-body 的 max-width 统一约束。 */
+        .msg-body {
+            width: fit-content;
+            max-width: min(74%, 660px);
+            min-width: 0;            /* 允许 flex 收缩，避免撑破容器 */
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
         .msg.user .msg-body { align-items: flex-end; }
 
         .bubble {
@@ -229,8 +241,10 @@
             border-radius: var(--radius-lg);
             font-size: 14.5px;
             line-height: 1.78;
+            width: 100%;
+            max-width: 100%;
             word-break: break-word;
-            overflow-wrap: anywhere;
+            overflow-wrap: break-word;      /* 不能用 anywhere：那会抹掉 min-content 宽度 */
             box-shadow: var(--shadow-soft);
         }
         .msg.bot .bubble {
@@ -303,13 +317,28 @@
         }
         .bubble pre code { background: none; color: inherit; padding: 0; }
         .bubble strong { color: var(--grass-700); }
+        /* 流式输出光标：作为气泡最后一个子元素，不参与 markdown 重渲染 */
+        .bubble .stream-caret {
+            display: inline-block;
+            width: 2px;
+            height: 1em;
+            margin-left: 3px;
+            vertical-align: -2px;
+            background: var(--grass-500);
+            border-radius: 1px;
+            animation: caretBlink .9s steps(1, end) infinite;
+        }
+        @keyframes caretBlink {
+            0%, 49%   { opacity: 1; }
+            50%, 100% { opacity: .12; }
+        }
 
         /* ---------- 打字中指示 ---------- */
         .typing-bubble {
             display: flex;
             align-items: center;
             gap: 5px;
-            padding: 15px 18px;
+            padding: 14px 18px;
         }
         .typing-bubble i {
             width: 7px; height: 7px;
@@ -322,6 +351,17 @@
         @keyframes typing {
             0%, 60%, 100% { transform: translateY(0); opacity: .42; }
             30%           { transform: translateY(-6px); opacity: 1; }
+        }
+        /* 等待期间的阶段提示文字：让用户知道系统正在做什么，避免"像卡住了" */
+        .typing-text {
+            font-size: 13px;
+            color: var(--ink-soft);
+            letter-spacing: .3px;
+            animation: fadeSwap .35s ease both;
+        }
+        @keyframes fadeSwap {
+            from { opacity: 0; transform: translateY(3px); }
+            to   { opacity: 1; transform: none; }
         }
 
         /* ---------- 欢迎卡片 ---------- */
@@ -440,8 +480,8 @@
         @media (max-width: 720px) {
             body { padding: 0; }
             .app { height: 100vh; width: 100%; border-radius: 0; border: none; }
-            .chat-area { padding: 16px 14px 8px; }
-            .msg-body { max-width: 86%; }
+            .chat-area { padding: 16px 12px 8px; }
+            .msg-body { width: 100%; max-width: 86%; }
             .brand-sub { display: none; }
             .composer { padding: 10px 12px 14px; }
             .composer-inner { padding-left: 12px; }
@@ -449,9 +489,21 @@
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; }
         }
+
+        /* ---------- 流式输出（重写后新增） ---------- */
+        /* 纯文本流式内容：pre-wrap 保留换行，且保证中文横向排版 */
+        .stream-text {
+            white-space: pre-wrap;
+            word-break: break-word;
+            overflow-wrap: break-word;
+            min-width: 0;
+        }
+        /* pre-wrap 会撑大三点指示器的空隙，这里还原为紧凑排列 */
+        .typing-bubble { white-space: normal; }
     </style>
 </head>
 <body>
+
 
 <!-- 背景装饰层 -->
 <div class="bg-layer" aria-hidden="true">
@@ -514,28 +566,23 @@
     </footer>
 </main>
 
+
 <script>
 (function () {
     'use strict';
 
     /* ============================================================
-     * 常量与配置
+     * 常量
      * ============================================================ */
-    var WS_PROTOCOL = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    var WS_URL = WS_PROTOCOL + location.host + '/ws/chat';
-    var HEARTBEAT_INTERVAL = 30000;   // 与服务端 HEARTBEAT_INTERVAL 保持一致
-    var WATCHDOG_TIMEOUT = 90000;     // 90s 内收不到任何服务端帧 → 判定假死（留足 LLM 生成时间）
+    var WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/chat';
+    var HEARTBEAT_INTERVAL = 30000;   // 与服务端 HEARTBEAT_INTERVAL 一致
+    var WATCHDOG_TIMEOUT = 120000;    // 120s 收不到任何服务端帧则判定假死
     var MAX_RECONNECT_DELAY = 15000;
-    var PENDING_MAX = 20;             // 离线待发队列上限
-
-    var STATUS_TEXT = {
-        connected: '已连接',
-        connecting: '连接中',
-        offline: '已断开'
-    };
+    var PENDING_MAX = 20;
+    var AVATAR_SRC = '/static/data/nahida.jpg';
 
     /* ============================================================
-     * DOM 引用
+     * DOM
      * ============================================================ */
     var chatArea = document.getElementById('chatArea');
     var welcome = document.getElementById('welcome');
@@ -547,279 +594,406 @@
     var connHint = document.getElementById('connHint');
 
     /* ============================================================
-     * 工具函数
+     * 小工具
      * ============================================================ */
-    function escapeHtml(text) {
-        return String(text)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#39;');
+    function esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
-    function formatTime(date) {
-        var d = date || new Date();
-        var p = function (n) { return n < 10 ? '0' + n : '' + n; };
+    function nowTime() {
+        var d = new Date(), p = function (n) { return n < 10 ? '0' + n : '' + n; };
         return p(d.getHours()) + ':' + p(d.getMinutes());
     }
 
-    function scrollToBottom() {
-        chatArea.scrollTop = chatArea.scrollHeight;
+    function toBottom() {
+        if (chatArea) { chatArea.scrollTop = chatArea.scrollHeight; }
+    }
+
+    function makeAvatar(role) {
+        var box = document.createElement('div');
+        box.className = 'msg-avatar';
+        if (role === 'user') {
+            box.textContent = '🧑';
+            return box;
+        }
+        var img = document.createElement('img');
+        img.className = 'avatar-img';
+        img.src = AVATAR_SRC;
+        img.alt = '纳西妲';
+        // 图片加载失败也不影响布局：退化为一个圆点
+        img.onerror = function () {
+            img.style.display = 'none';
+            box.textContent = '🌿';
+            box.style.display = 'grid';
+            box.style.placeItems = 'center';
+            box.style.fontSize = '20px';
+        };
+        box.appendChild(img);
+        return box;
+    }
+
+    function dropWelcome() {
+        try {
+            if (welcome && welcome.parentNode) { welcome.parentNode.removeChild(welcome); }
+        } catch (e) { /* 忽略 */ }
+        welcome = null;
     }
 
     /* ============================================================
-     * 轻量 Markdown 渲染（不引外部库，先转义再渲染，无 XSS 风险）
-     * 支持：# 标题、- / * 无序、1. 有序、> 引用、``` 代码块、**粗体**、`行内代码`
+     * 极简 Markdown 渲染（先转义，再套标签）
+     * 只用最基础的规则，降低出错概率
      * ============================================================ */
-    function inlineFormat(text) {
-        var out = text;
-        out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-        out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
-        return out;
-    }
-
-    function renderMarkdown(raw) {
-        var src = escapeHtml(String(raw == null ? '' : raw)).replace(/\r\n?/g, '\n');
-        var lines = src.split('\n');
-        var html = [];
-        var listState = null;   // 'ul' | 'ol' | null
-        var paragraph = [];
-        var codeLines = null;
+    function md(raw) {
+        var text = esc(raw).replace(/\r\n?/g, '\n');
+        var lines = text.split('\n');
+        var out = [];
+        var list = null;        // 'ul' | 'ol' | null
+        var para = [];
+        var code = null;        // 代码块缓冲
 
         function closeList() {
-            if (listState) { html.push('</' + listState + '>'); listState = null; }
+            if (list) { out.push('</' + list + '>'); list = null; }
         }
-        function flushParagraph() {
-            if (paragraph.length) {
-                html.push('<p>' + inlineFormat(paragraph.join('<br>')) + '</p>');
-                paragraph = [];
+        function flushPara() {
+            if (para.length) {
+                out.push('<p>' + para.join('<br>') + '</p>');
+                para = [];
             }
         }
-        function flushAll() { flushParagraph(); closeList(); }
+        function flushAll() { flushPara(); closeList(); }
 
         for (var i = 0; i < lines.length; i++) {
             var line = lines[i];
 
-            // 代码块
             if (/^\s*```/.test(line)) {
-                if (codeLines === null) {
-                    flushAll();
-                    codeLines = [];
-                } else {
-                    html.push('<pre><code>' + codeLines.join('\n') + '</code></pre>');
-                    codeLines = null;
-                }
+                if (code === null) { flushAll(); code = []; }
+                else { out.push('<pre><code>' + code.join('\n') + '</code></pre>'); code = null; }
                 continue;
             }
-            if (codeLines !== null) { codeLines.push(line); continue; }
+            if (code !== null) { code.push(line); continue; }
 
-            // 空行
             if (!line.trim()) { flushAll(); continue; }
 
-            // 标题
             var h = line.match(/^(#{1,6})\s+(.*)$/);
             if (h) {
                 flushAll();
-                var level = Math.min(Math.max(h[1].length, 1), 3);
-                html.push('<h' + level + '>' + inlineFormat(h[2].trim()) + '</h' + level + '>');
+                var lv = Math.min(Math.max(h[1].length, 1), 3);
+                out.push('<h' + lv + '>' + h[2].trim() + '</h' + lv + '>');
                 continue;
             }
 
-            // 分隔线
-            if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { flushAll(); html.push('<hr>'); continue; }
-
-            // 引用
-            var q = line.match(/^\s*&gt;\s?(.*)$/);
-            if (q) { flushAll(); html.push('<blockquote>' + inlineFormat(q[1]) + '</blockquote>'); continue; }
-
-            // 无序列表
             var ul = line.match(/^\s*[-*•]\s+(.*)$/);
             if (ul) {
-                flushParagraph();
-                if (listState !== 'ul') { closeList(); html.push('<ul>'); listState = 'ul'; }
-                html.push('<li>' + inlineFormat(ul[1]) + '</li>');
+                flushPara();
+                if (list !== 'ul') { closeList(); out.push('<ul>'); list = 'ul'; }
+                out.push('<li>' + ul[1] + '</li>');
                 continue;
             }
 
-            // 有序列表
             var ol = line.match(/^\s*\d+[.、)]\s+(.*)$/);
             if (ol) {
-                flushParagraph();
-                if (listState !== 'ol') { closeList(); html.push('<ol>'); listState = 'ol'; }
-                html.push('<li>' + inlineFormat(ol[1]) + '</li>');
+                flushPara();
+                if (list !== 'ol') { closeList(); out.push('<ol>'); list = 'ol'; }
+                out.push('<li>' + ol[1] + '</li>');
                 continue;
             }
 
-            // 普通段落
+            var bq = line.match(/^\s*&gt;\s?(.*)$/);
+            if (bq) { flushAll(); out.push('<blockquote>' + bq[1] + '</blockquote>'); continue; }
+
             closeList();
-            paragraph.push(line.trim());
+            para.push(line.trim());
         }
 
-        if (codeLines !== null) { html.push('<pre><code>' + codeLines.join('\n') + '</code></pre>'); }
+        if (code !== null) { out.push('<pre><code>' + code.join('\n') + '</code></pre>'); }
         flushAll();
-        return html.join('');
+
+        // 行内强调
+        var joined = out.join('');
+        joined = joined.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+        joined = joined.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+        return joined;
+    }
+
+    /* 渲染失败时降级为纯文本，绝不抛给调用方 */
+    function safeMd(raw) {
+        try {
+            return md(raw);
+        } catch (e) {
+            console.warn('[LawChain] markdown 渲染失败，改用纯文本', e);
+            return '<span class="stream-text">' + esc(raw) + '</span>';
+        }
     }
 
     /* ============================================================
-     * 消息渲染
+     * 消息构建
      * ============================================================ */
-    /* 机器人的消息头像：使用 static/data/nahida.jpg */
-    function botAvatarNode() {
-        var img = document.createElement('img');
-        img.className = 'avatar-img';
-        img.src = '/static/data/nahida.jpg';
-        img.alt = '纳西妲';
-        return img;
-    }
-
-    function hideWelcome() {
-        if (welcome && welcome.parentNode) { welcome.parentNode.removeChild(welcome); }
-        welcome = null;
-    }
-
-    function addMessage(role, text, options) {
-        options = options || {};
-        hideWelcome();
-
+    function buildMessage(role, isError) {
         var wrap = document.createElement('div');
-        wrap.className = 'msg ' + role + (options.error ? ' error' : '');
-
-        var avatar = document.createElement('div');
-        avatar.className = 'msg-avatar';
-        if (role === 'user') {
-            avatar.textContent = '🧑';
-        } else {
-            avatar.appendChild(botAvatarNode());
-        }
+        wrap.className = 'msg ' + role + (isError ? ' error' : '');
 
         var body = document.createElement('div');
         body.className = 'msg-body';
 
         var bubble = document.createElement('div');
         bubble.className = 'bubble';
-        if (role === 'user') {
-            bubble.textContent = text;
-        } else {
-            bubble.innerHTML = renderMarkdown(text);
-        }
 
         var time = document.createElement('div');
         time.className = 'msg-time';
-        time.textContent = formatTime();
+        time.textContent = nowTime();
 
         body.appendChild(bubble);
         body.appendChild(time);
-        wrap.appendChild(avatar);
+        wrap.appendChild(makeAvatar(role));
         wrap.appendChild(body);
-        chatArea.appendChild(wrap);
-        scrollToBottom();
-        return wrap;
+        return { wrap: wrap, body: body, bubble: bubble, time: time };
     }
 
-    var typingEl = null;
-    function showTyping() {
-        if (typingEl) { return; }
-        hideWelcome();
-        typingEl = document.createElement('div');
-        typingEl.className = 'msg bot';
-
-        var avatar = document.createElement('div');
-        avatar.className = 'msg-avatar';
-        avatar.appendChild(botAvatarNode());
-
-        var body = document.createElement('div');
-        body.className = 'msg-body';
-        var bubble = document.createElement('div');
-        bubble.className = 'bubble typing-bubble';
-        bubble.innerHTML = '<i></i><i></i><i></i>';
-        body.appendChild(bubble);
-
-        typingEl.appendChild(avatar);
-        typingEl.appendChild(body);
-        chatArea.appendChild(typingEl);
-        scrollToBottom();
-    }
-
-    function hideTyping() {
-        if (typingEl && typingEl.parentNode) { typingEl.parentNode.removeChild(typingEl); }
-        typingEl = null;
+    /* 完整消息：用于用户提问、错误提示、非流式回答 */
+    function addFullMessage(role, text, isError) {
+        dropWelcome();
+        var m = buildMessage(role, isError);
+        if (role === 'user') {
+            m.bubble.textContent = text;
+        } else {
+            m.bubble.innerHTML = safeMd(text);
+        }
+        if (chatArea) { chatArea.appendChild(m.wrap); }
+        toBottom();
     }
 
     /* ============================================================
-     * 连接状态
+     * 流式：单个气泡
+     * 流式期间用纯文本（pre-wrap，绝不竖排）；结束时一次性渲染 markdown
+     * ============================================================ */
+    var S = { open: false, wrap: null, body: null, bubble: null, text: null, raw: '' };
+
+    function streamBegin() {
+        dropWelcome();
+        var m = buildMessage('bot', false);
+        var span = document.createElement('span');
+        span.className = 'stream-text';
+        span.textContent = '';
+        m.bubble.appendChild(span);
+
+        if (chatArea) { chatArea.appendChild(m.wrap); }
+
+        S.open = true;
+        S.wrap = m.wrap; S.body = m.body; S.bubble = m.bubble; S.text = span; S.raw = '';
+        toBottom();
+    }
+
+    function streamDelta(piece) {
+        if (!S.text) { return; }
+        S.raw += piece;
+        try {
+            S.text.textContent = S.raw;
+        } catch (e) {
+            console.warn('[LawChain] 更新流式文本失败', e);
+        }
+        toBottom();
+    }
+
+    function streamEnd() {
+        if (!S.open) { return; }
+        // 收尾渲染：失败也不影响已有纯文本
+        if (S.bubble) {
+            try {
+                S.bubble.innerHTML = safeMd(S.raw);
+            } catch (e) { /* 保留纯文本 */ }
+        }
+        S.open = false; S.wrap = null; S.body = null; S.bubble = null; S.text = null; S.raw = '';
+        toBottom();
+    }
+
+    function streamReset() {
+        S.open = false; S.wrap = null; S.body = null; S.bubble = null; S.text = null; S.raw = '';
+    }
+
+    /* ============================================================
+     * 三点思考指示器
+     * ============================================================ */
+    var typingEl = null;      // 指示器整条消息
+    var typingText = null;    // 其中的阶段文字节点
+
+    /* 显示等待指示器；text 为阶段提示，会一直保留到第一个字到来 */
+    function showTyping(text) {
+        if (typingEl) { setTypingText(text); return; }
+        dropWelcome();
+        var m = buildMessage('bot', false);
+        m.bubble.className = 'bubble typing-bubble';
+        m.bubble.appendChild(document.createElement('i'));
+        m.bubble.appendChild(document.createElement('i'));
+        m.bubble.appendChild(document.createElement('i'));
+
+        typingText = document.createElement('span');
+        typingText.className = 'typing-text';
+        typingText.textContent = text || '正在检索法规与案例…';
+        m.bubble.appendChild(typingText);
+
+        if (chatArea) { chatArea.appendChild(m.wrap); }
+        typingEl = m.wrap;
+        toBottom();
+    }
+
+    /* 更新阶段提示（重新触发淡入动画） */
+    function setTypingText(text) {
+        if (!typingText || !text || typingText.textContent === text) { return; }
+        var parent = typingText.parentNode;
+        if (!parent) { return; }
+        var fresh = document.createElement('span');
+        fresh.className = 'typing-text';
+        fresh.textContent = text;
+        parent.replaceChild(fresh, typingText);
+        typingText = fresh;
+        toBottom();
+    }
+
+    function hideTyping() {
+        try {
+            if (typingEl && typingEl.parentNode) { typingEl.parentNode.removeChild(typingEl); }
+        } catch (e) { /* 忽略 */ }
+        typingEl = null;
+        typingText = null;
+    }
+
+    /* ============================================================
+     * 连接
      * ============================================================ */
     var socket = null;
-    var state = 'connecting';
-    var heartbeatTimer = null;
-    var watchdogTimer = null;
+    var hbTimer = null;
+    var watchdog = null;
     var reconnectTimer = null;
-    var reconnectAttempt = 0;
-    var lastPingSentAt = 0;
-    var pendingQueue = [];
-    var manualClose = false;
+    var retry = 0;
+    var lastPing = 0;
+    var pending = [];
+    var closing = false;
 
-    function setStatus(next, note) {
-        state = next;
-        statusChip.setAttribute('data-state', next);
-        statusText.textContent = STATUS_TEXT[next] || next;
-        if (note) { connHint.textContent = note; }
-        if (next !== 'connected') { latencyEl.textContent = ''; }
+    var LABEL = { connected: '已连接', connecting: '连接中', offline: '已断开' };
+
+    function setStatus(name, note) {
+        if (statusChip) { statusChip.setAttribute('data-state', name); }
+        if (statusText) { statusText.textContent = LABEL[name] || name; }
+        if (connHint && note) { connHint.textContent = note; }
+        if (name !== 'connected' && latencyEl) { latencyEl.textContent = ''; }
+    }
+
+    function isOpen() { return socket !== null && socket.readyState === WebSocket.OPEN; }
+
+    function send(obj) {
+        if (!isOpen()) { return false; }
+        try { socket.send(JSON.stringify(obj)); return true; }
+        catch (e) { return false; }
     }
 
     function clearTimers() {
-        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-        if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+        if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
+        if (watchdog) { clearTimeout(watchdog); watchdog = null; }
     }
 
-    /* 看门狗：在没有收到任何服务端帧的情况下兜底判定连接假死 */
     function armWatchdog() {
-        if (watchdogTimer) { clearTimeout(watchdogTimer); }
-        watchdogTimer = setTimeout(function () {
-            if (socket && state === 'connected') {
-                console.warn('[LawChain] 心跳看门狗超时，判定连接假死，主动重连');
-                try { socket.close(4000, 'watchdog timeout'); } catch (e) { /* 忽略 */ }
+        if (watchdog) { clearTimeout(watchdog); }
+        watchdog = setTimeout(function () {
+            if (isOpen()) {
+                console.warn('[LawChain] 看门狗超时，主动重连');
+                try { socket.close(4000, 'watchdog'); } catch (e) { /* 忽略 */ }
             }
         }, WATCHDOG_TIMEOUT);
     }
 
-    function send(payload) {
-        if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify(payload));
-            return true;
-        }
-        return false;
-    }
-
-    function canSend() {
-        return socket !== null && socket.readyState === WebSocket.OPEN;
+    function startHeartbeat() {
+        clearTimers();
+        armWatchdog();
+        hbTimer = setInterval(function () {
+            if (isOpen()) { lastPing = Date.now(); send({ type: 'ping' }); }
+        }, HEARTBEAT_INTERVAL);
     }
 
     function scheduleReconnect() {
-        if (manualClose || reconnectTimer) { return; }
-        var delay = Math.min(1000 * Math.pow(2, reconnectAttempt), MAX_RECONNECT_DELAY);
-        reconnectAttempt += 1;
-        setStatus('offline', '连接已断开，' + Math.round(delay / 1000) + ' 秒后自动重连…');
+        if (closing || reconnectTimer) { return; }
+        var delay = Math.min(1000 * Math.pow(2, retry), MAX_RECONNECT_DELAY);
+        retry += 1;
+        setStatus('offline', '连接已断开，' + Math.round(delay / 1000) + ' 秒后重连…');
         reconnectTimer = setTimeout(function () {
             reconnectTimer = null;
             connect();
         }, delay);
     }
 
-    function startHeartbeat() {
-        clearTimers();
-        armWatchdog();
-        heartbeatTimer = setInterval(function () {
-            if (canSend()) {
-                lastPingSentAt = Date.now();
-                send({ type: 'ping' });
-            }
-        }, HEARTBEAT_INTERVAL);
+    /* 处理一帧服务端消息 */
+    function onFrame(payload) {
+        switch (payload.type) {
+            case 'ping':
+                send({ type: 'pong' });
+                break;
+
+            case 'pong':
+                if (lastPing && latencyEl) {
+                    latencyEl.textContent = (Date.now() - lastPing) + ' ms';
+                    lastPing = 0;
+                }
+                break;
+
+            case 'answer_start':
+                // 关键：这里【不收掉】等待指示器。
+                // 服务端在 answer_start 之后往往还要等 LLM 出第一个 token（可能数秒），
+                // 若此刻就撤掉指示器、开一个空气泡，用户会看到"气泡空白"以为卡死。
+                // 正确做法：指示器留到第一个字真正到来（见 answer_delta），只更新阶段文案。
+                streamReset();
+                setTypingText('正在生成回答…');
+                break;
+
+            case 'answer_delta':
+                if (!S.open) {
+                    // 第一个字到了 —— 此刻才撤掉指示器、建立气泡，两者无缝衔接
+                    hideTyping();
+                    streamBegin();
+                }
+                streamDelta(payload.text || '');
+                break;
+
+            case 'answer_end':
+                // 注意：streamEnd() 会清空 S.raw，所以必须在收尾【之前】判断是否有内容
+                if (S.open && S.raw !== '') {
+                    streamEnd();
+                    hideTyping();
+                } else {
+                    // 有 answer_start 但一个 delta 都没来（或内容为空）：
+                    // 不要留下空白气泡，直接给一句明确提示
+                    streamReset();
+                    hideTyping();
+                    addFullMessage('bot', '抱歉，没有查询到相关内容呢 QAQ', false);
+                }
+                break;
+
+            /* 一次性回答（缓存 / BM25 / 空问题 / 无结果） */
+            case 'answer':
+                hideTyping();
+                streamReset();
+                addFullMessage('bot', payload.text || '（没有返回内容）', false);
+                break;
+
+            case 'error':
+                hideTyping();
+                streamReset();
+                addFullMessage('bot', payload.text || '服务端处理出错了。', true);
+                break;
+
+            default:
+                if (payload.text) {
+                    hideTyping();
+                    streamReset();
+                    addFullMessage('bot', payload.text, false);
+                }
+        }
     }
 
     function connect() {
-        if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) { return; }
-        setStatus('connecting', '正在连接知识库…');
+        if (socket && (socket.readyState === WebSocket.OPEN ||
+                       socket.readyState === WebSocket.CONNECTING)) { return; }
+        setStatus('connecting', '正在连接…');
         try {
             socket = new WebSocket(WS_URL);
         } catch (e) {
@@ -828,58 +1002,34 @@
         }
 
         socket.onopen = function () {
-            reconnectAttempt = 0;
+            retry = 0;
             setStatus('connected', '已连接，随时可以提问');
             startHeartbeat();
-            // 回放离线期间积压的问题
-            var queued = pendingQueue.slice();
-            pendingQueue = [];
+            var queued = pending.slice();
+            pending = [];
             queued.forEach(function (q) { ask(q); });
         };
 
-        socket.onmessage = function (event) {
+        socket.onmessage = function (ev) {
             armWatchdog();
             var payload;
-            try {
-                payload = JSON.parse(event.data);
-            } catch (e) {
-                payload = { type: 'answer', text: event.data };
-            }
+            try { payload = JSON.parse(ev.data); }
+            catch (e) { payload = { type: 'answer', text: ev.data }; }
             if (typeof payload === 'string') { payload = { type: 'answer', text: payload }; }
-            if (!payload || typeof payload !== 'object') { return; }
-
-            switch (payload.type) {
-                case 'ping':
-                    send({ type: 'pong' });
-                    break;
-                case 'pong':
-                    if (lastPingSentAt) {
-                        latencyEl.textContent = (Date.now() - lastPingSentAt) + ' ms';
-                        lastPingSentAt = 0;
-                    }
-                    break;
-                case 'answer':
-                    hideTyping();
-                    addMessage('bot', payload.text || '（没有返回内容）');
-                    break;
-                case 'error':
-                    hideTyping();
-                    addMessage('bot', payload.text || '服务端处理出错了。', { error: true });
-                    break;
-                default:
-                    if (payload.text) { hideTyping(); addMessage('bot', payload.text); }
+            if (payload && typeof payload === 'object' && payload.type) {
+                try { onFrame(payload); }
+                catch (e) { console.error('[LawChain] 处理消息出错', e, payload); }
             }
         };
 
-        socket.onerror = function () {
-            console.warn('[LawChain] WebSocket 连接异常');
-        };
+        socket.onerror = function () { console.warn('[LawChain] WebSocket 异常'); };
 
         socket.onclose = function () {
             clearTimers();
             hideTyping();
+            streamReset();
             socket = null;
-            if (manualClose) { setStatus('offline', '连接已关闭'); return; }
+            if (closing) { setStatus('offline', '连接已关闭'); return; }
             scheduleReconnect();
         };
     }
@@ -887,111 +1037,111 @@
     /* ============================================================
      * 提问
      * ============================================================ */
-    function ask(rawText) {
-        var text = (rawText == null ? '' : String(rawText)).trim();
+    function ask(raw) {
+        var text = String(raw == null ? '' : raw).trim();
         if (!text) { return; }
 
-        addMessage('user', text);
+        hideTyping();
+        streamReset();
+        addFullMessage('user', text, false);
 
-        if (!canSend()) {
-            if (pendingQueue.length < PENDING_MAX) {
-                pendingQueue.push(text);
-                addMessage('bot', '网络好像有点晃神，这条问题我先记在小本本上，连上之后立刻替你查～', { error: true });
+        if (!isOpen()) {
+            if (pending.length < PENDING_MAX) {
+                pending.push(text);
+                addFullMessage('bot', '连接还没就绪，这条问题我先记下，连上后立刻替你查～', true);
+                if (!reconnectTimer && !closing) { connect(); }
             } else {
-                addMessage('bot', '积压的问题有点多啦，等连接恢复后再问吧 QAQ', { error: true });
+                addFullMessage('bot', '积压的问题太多了，等连接恢复后再问吧 QAQ', true);
             }
-            if (!reconnectTimer && !manualClose) { connect(); }
             return;
         }
 
-        showTyping();
+        // 先给出阶段提示：命中缓存/关键词会很快被 answer 帧替换，
+        // 未命中则要经历 检索分类 → 问题改写 → 向量检索+重排 → LLM 生成，可能数秒
+        showTyping('正在检索法规与案例…');
         send({ type: 'question', text: text });
+    }
+
+    /* ============================================================
+     * 输入区
+     * ============================================================ */
+    function autoGrow() {
+        if (!input) { return; }
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 132) + 'px';
+    }
+
+    function refreshBtn() {
+        if (sendBtn && input) { sendBtn.disabled = input.value.trim().length === 0; }
+    }
+
+    function submit() {
+        if (!input) { return; }
+        var text = input.value.trim();
+        if (!text) { return; }
+        input.value = '';
+        autoGrow();
+        refreshBtn();
+        ask(text);
+        input.focus();
     }
 
     /* ============================================================
      * 事件绑定
      * ============================================================ */
-    function autoGrow() {
-        input.style.height = 'auto';
-        input.style.height = Math.min(input.scrollHeight, 132) + 'px';
+    if (input) {
+        input.addEventListener('input', function () { autoGrow(); refreshBtn(); });
+        input.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+                e.preventDefault();
+                submit();
+            }
+        });
     }
-
-    function refreshSendBtn() {
-        sendBtn.disabled = input.value.trim().length === 0;
+    if (sendBtn) { sendBtn.addEventListener('click', submit); }
+    if (welcome) {
+        welcome.addEventListener('click', function (e) {
+            var chip = e.target.closest ? e.target.closest('.chip') : null;
+            if (!chip) { return; }
+            ask(chip.getAttribute('data-q') || chip.textContent);
+        });
     }
-
-    input.addEventListener('input', function () {
-        autoGrow();
-        refreshSendBtn();
-    });
-
-    input.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-            e.preventDefault();
-            submit();
-        }
-    });
-
-    sendBtn.addEventListener('click', submit);
-
-    function submit() {
-        var text = input.value.trim();
-        if (!text) { return; }
-        input.value = '';
-        autoGrow();
-        refreshSendBtn();
-        ask(text);
-        input.focus();
-    }
-
-    welcome.addEventListener('click', function (e) {
-        var chip = e.target.closest('.chip');
-        if (!chip) { return; }
-        ask(chip.getAttribute('data-q') || chip.textContent);
-    });
 
     document.addEventListener('visibilitychange', function () {
-        if (document.visibilityState === 'visible' && !canSend() && !manualClose && !reconnectTimer) {
-            reconnectAttempt = 0;
+        if (document.visibilityState === 'visible' && !isOpen() && !closing && !reconnectTimer) {
+            retry = 0;
             connect();
         }
     });
 
     window.addEventListener('beforeunload', function () {
-        manualClose = true;
+        closing = true;
         clearTimers();
-        if (socket) { try { socket.close(1000, 'page unload'); } catch (e) { /* 忽略 */ } }
+        if (socket) { try { socket.close(1000, 'unload'); } catch (e) { /* 忽略 */ } }
     });
 
-    /* 首帧主动探活，尽快拿到一次延迟数据 */
-    setTimeout(function () {
-        if (canSend()) { lastPingSentAt = Date.now(); send({ type: 'ping' }); }
-    }, 800);
-
-    /* ============================================================
-     * 背景叶片装饰
-     * ============================================================ */
+    /* 背景漂浮叶片（纯装饰，失败不影响功能） */
     (function decorate() {
-        var layer = document.querySelector('.bg-layer');
-        if (!layer) { return; }
-        var glyphs = ['🌿', '🍃', '☘️', '✨'];
-        for (var i = 0; i < 14; i++) {
-            var leaf = document.createElement('span');
-            leaf.className = 'leaf';
-            leaf.textContent = glyphs[i % glyphs.length];
-            leaf.style.left = (Math.random() * 96) + '%';
-            leaf.style.fontSize = (14 + Math.random() * 16) + 'px';
-            leaf.style.animationDuration = (14 + Math.random() * 14) + 's';
-            leaf.style.animationDelay = (-Math.random() * 20) + 's';
-            layer.appendChild(leaf);
-        }
+        try {
+            var layer = document.querySelector('.bg-layer');
+            if (!layer) { return; }
+            var glyphs = ['🌿', '🍃', '☘️', '✨'];
+            for (var i = 0; i < 14; i++) {
+                var leaf = document.createElement('span');
+                leaf.className = 'leaf';
+                leaf.textContent = glyphs[i % glyphs.length];
+                leaf.style.left = (Math.random() * 96) + '%';
+                leaf.style.fontSize = (14 + Math.random() * 16) + 'px';
+                leaf.style.animationDuration = (14 + Math.random() * 14) + 's';
+                leaf.style.animationDelay = (-Math.random() * 20) + 's';
+                layer.appendChild(leaf);
+            }
+        } catch (e) { /* 忽略 */ }
     })();
 
-    /* ============================================================
-     * 启动
-     * ============================================================ */
+    /* 启动 */
     autoGrow();
-    refreshSendBtn();
+    refreshBtn();
     connect();
 })();
 </script>

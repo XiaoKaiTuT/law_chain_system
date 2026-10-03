@@ -25,8 +25,9 @@ class RAGQAClient:
         :return: llm模型生成的答案
         """
         try:
-            context = self.milvus_client.search(query)
-            response = self.llm_client.generate(query, context)
+            optimizer_query = self.llm_client.query_generate(query)
+            case_chunk, clause_chunk = self.milvus_client.search(optimizer_query)
+            response = self.llm_client.generate(query, case_chunk, clause_chunk)
             return response
         except Exception as e:
             self.logger.error(f"RAGQA查询异常: {e}")

@@ -1,7 +1,9 @@
 import os
 import sys
 import hashlib
-from pymilvus import MilvusClient, MilvusException, DataType
+from pymilvus import MilvusClient, MilvusException, DataType, AnnSearchRequest, WeightedRanker
+# LoadState 在 pymilvus 2.5.4 未从顶层导出，需从 client.types 导入
+from pymilvus.client.types import LoadState
 
 current_dir: str = os.path.dirname(os.path.abspath(__file__))
 rag_qa_dir = os.path.dirname(current_dir)
@@ -12,6 +14,7 @@ if project_dir not in sys.path:
 from base import config, setup_logger
 from rag_qa.utils.embedding import VectorTools
 from mysql_qa.db.mysql_client import MySQLClient
+from rag_qa.utils.reranker import RerankerTools
 logger = setup_logger(os.path.splitext(os.path.basename(__file__))[0])
 
 # Milvus客户端类
@@ -20,6 +23,7 @@ class MilvusClientSystem:
         self.logger = logger
         self.mysql_client = MySQLClient()
         self.vector_tools = VectorTools()
+        self.reranker_tool = RerankerTools()
         self.dense_dim = config.VECTOR_DIM
         self.database = config.MILVUS_DATA_NAME
         self.collection_case = config.MILVUS_COLLECTION_CASES
@@ -245,7 +249,13 @@ class MilvusClientSystem:
                 raise
         self.logger.info(f"数据插入成功")
 
-    def search(self, query: str, top_k: int = config.RETRIEVAL_K) -> list:
+    def search(
+            self, query: str|list,
+            case_top_k: int = config.CASE_RETRIEVAL_K,
+            case_top_m: int = config.CASE_CANDIDATE_M,
+            clause_top_k: int = config.CLAUSE_RETRIEVAL_K,
+            clause_top_m: int = config.CLAUSE_CANDIDATE_M,
+    ) -> tuple[list, list]:
         """
         函数作用：通过查询语句查询相似数据
         :param query:查询语句
@@ -254,33 +264,132 @@ class MilvusClientSystem:
         """
         # 查询语句为空时返回空列表
         if not query:
-            return []
+            return [], []
+
+        self._ensure_loaded()
+
+        # 对于topK和topM的数量进行管控
+        if case_top_k < config.CASE_RETRIEVAL_K:
+            self.logger.warning(f"top_k {case_top_k} 小于配置值 {config.CASE_RETRIEVAL_K}，已设置为默认值")
+            case_top_k = config.CASE_RETRIEVAL_K
+        if case_top_m < config.CASE_CANDIDATE_M:
+            self.logger.warning(f"top_m {case_top_m} 小于配置值 {config.CASE_CANDIDATE_M}，已设置为默认值")
+            case_top_m = config.CASE_CANDIDATE_M
+        if clause_top_k < config.CLAUSE_RETRIEVAL_K:
+            self.logger.warning(f"top_k {clause_top_k} 小于配置值 {config.CLAUSE_RETRIEVAL_K}，已设置为默认值")
+            clause_top_k = config.CLAUSE_RETRIEVAL_K
+        if clause_top_m < config.CLAUSE_CANDIDATE_M:
+            self.logger.warning(f"top_m {clause_top_m} 小于配置值 {config.CLAUSE_CANDIDATE_M}，已设置为默认值")
+            clause_top_m = config.CLAUSE_CANDIDATE_M
+
+        # 统一用户问题的类型为列表
+        query = [query] if isinstance(query, str) else query
+        num = len(query)
+
+        # 汇总查询结果
+        case_chunk = []
+        clause_chunk = []
 
         try:
-            query_embedding, _ = self.vector_tools.encode_query(query)
-            result_case = self.client.search(
-                collection_name=self.collection_case,
-                data=[query_embedding],
-                anns_field="dense_vector",
-                limit=top_k,
-                search_params={"metric_type": "COSINE"},
-                output_fields=['parent_content', 'title', 'source']
-            )
-            result_clause = self.client.search(
-                collection_name=self.collection_clause,
-                data=[query_embedding],
-                anns_field="dense_vector",
-                limit=top_k,
-                search_params={"metric_type": "COSINE"},
-                output_fields=['text_content', 'title', 'source']
-            )
-            result = []
-            result.extend(result_case)
-            result.extend(result_clause)
-            return result
+            # 对每个子问题进行查询
+            for question in query:
+                # 混合检索(粗排)
+                query_dense, query_sparse = self.vector_tools.encode_query(question)
+                # 案情
+                dense_case = AnnSearchRequest(
+                    data=[query_dense],
+                    anns_field="dense_vector",
+                    limit=case_top_k,
+                    param={"metric_type": "COSINE"},
+                )
+                sparse_case = AnnSearchRequest(
+                    data=[query_sparse],
+                    anns_field="sparse_vector",
+                    limit=case_top_k,
+                    param={"metric_type": "IP"},
+                )
+                ranker = WeightedRanker(1.0, 0.7)
+                results_case = self.client.hybrid_search(
+                    collection_name=self.collection_case,
+                    reqs=[dense_case, sparse_case],
+                    ranker=ranker,
+                    limit=case_top_k,
+                    output_fields=['parent_content', 'title', 'source']
+                )
+                case_result = [hit["entity"] for hit in results_case[0]]
+
+                # 法律条例
+                dense_clause = AnnSearchRequest(
+                    data=[query_dense],
+                    anns_field="dense_vector",
+                    limit=clause_top_k,
+                    param={"metric_type": "COSINE"},
+                )
+                sparse_clause = AnnSearchRequest(
+                    data=[query_sparse],
+                    anns_field="sparse_vector",
+                    limit=clause_top_k,
+                    param={"metric_type": "IP"}
+                )
+                results_clause = self.client.hybrid_search(
+                    collection_name=self.collection_clause,
+                    reqs=[dense_clause, sparse_clause],
+                    ranker=ranker,
+                    limit=clause_top_k,
+                    output_fields=['text_content', 'title', 'source']
+                )
+                clause_result = [hit["entity"] for hit in results_clause[0]]
+
+                # 对查询结果去重
+                case_parent = self._de_weight(case_result)
+                clause_parent = self._de_weight(clause_result)
+
+                # 重排序(细排)
+                case_chunk.extend(self.reranker_tool.rerank(query=question, documents=case_parent, content_field='parent_content', top_m=max(case_top_m // num, 1)))
+                clause_chunk.extend(self.reranker_tool.rerank(query=question, documents=clause_parent, content_field='text_content', top_m=max(clause_top_m // num, 1)))
+            return case_chunk, clause_chunk
         except MilvusException as e:
             self.logger.error(f"Milvus 查询异常: {e}")
-            raise
+            return [], []
+
+    def _de_weight(self, results: list[dict]) -> list[dict]:
+        """
+        函数作用：对查询结果进行去重
+        :param results: 检索到的字典列表
+        :return: 去重后的字典列表
+        """
+        seen = set()
+        unique_results = []
+        for item in results:
+            content = None
+            if "parent_content" in item:
+                content = item.get("parent_content")
+            elif "text_content" in item:
+                content = item.get("text_content")
+            if content and content not in seen:
+                seen.add(content)
+                unique_results.append(item)
+        return unique_results
+
+    def _ensure_loaded(self) -> None:
+        """
+        函数作用：确保集合已加载到内存（Milvus 重启后集合会被自动卸载）
+
+        注意：判断加载状态必须用 get_load_state()，不能查 get_collection_stats() ——
+        后者只返回 row_count 之类的统计信息，没有加载状态字段。
+        """
+        for collection in (self.collection_case, self.collection_clause):
+            try:
+                state = self.client.get_load_state(collection)["state"]
+                if state != LoadState.Loaded:
+                    self.logger.warning(f"集合 {collection} 当前状态 {state!r}，重新加载")
+                    self.client.load_collection(collection)
+                    self.logger.info(f"集合 {collection} 重新加载完成")
+            except MilvusException as e:
+                self.logger.error(f"集合 {collection} 加载检查异常: {e}")
+            except Exception as e:
+                # 兜底：检查阶段失败不应拖垮整个检索（此前 KeyError 就是这么穿透的）
+                self.logger.error(f"集合 {collection} 状态检查异常: {type(e).__name__}: {e}")
 
     def close(self) -> None:
         """
@@ -306,8 +415,15 @@ if __name__ == '__main__':
     milvus_client = MilvusClientSystem()
 
     # 2. 查询用户问题
-    query = "婚前借名购房合意不明时房屋权属认定规则"
-    result = milvus_client.search(query)
+    # query = "婚前借名购房合意不明时房屋权属认定规则"
+    query = """
+    婚前一方贷款买房婚后共同还贷离婚时如何分割
+    婚前借名购房合意不明时房屋权属如何认定
+    离婚时房产增值部分如何补偿
+    """
+    sub_queries = [q.strip() for q in query.split("\n") if q.strip()]
+    print(sub_queries)
+    result = milvus_client.search(sub_queries)
     print(result)
 
     # 3. 测试数据库关闭

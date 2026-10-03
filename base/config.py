@@ -44,8 +44,10 @@ class Config:
 
         # 解析检索参数配置
         self.VECTOR_DIM = int(self.config.get('retrieval', 'vector_dim', fallback=1024))
-        self.RETRIEVAL_K = int(self.config.get('retrieval', 'retrieval_k', fallback=5))
-        self.CANDIDATE_M = int(self.config.get('retrieval', 'candidate_m', fallback=2))
+        self.CASE_RETRIEVAL_K = int(self.config.get('retrieval', 'case_retrieval_k', fallback=5))
+        self.CASE_CANDIDATE_M = int(self.config.get('retrieval', 'case_candidate_m', fallback=2))
+        self.CLAUSE_RETRIEVAL_K = int(self.config.get('retrieval', 'clause_retrieval_k', fallback=6))
+        self.CLAUSE_CANDIDATE_M = int(self.config.get('retrieval', 'clause_candidate_m', fallback=4))
 
         # 解析BM25搜索配置
         self.THRESHOLD = float(self.config.get('bm25', 'threshold', fallback=0.85))
@@ -67,5 +69,5 @@ if __name__ == '__main__':
     print('BM25搜索配置', config.THRESHOLD)
     print('Milvus配置', config.MILVUS_HOST, config.MILVUS_PORT, config.MILVUS_DATA_NAME, config.MILVUS_COLLECTION_CASES, config.MILVUS_COLLECTION_ARTICLES)
     print('LLM配置', config.MODEL_NAME, config.DASHSCOPE_API_KEY, config.DASHSCOPE_BASE_URL)
-    print('检索参数配置', config.VECTOR_DIM, config.RETRIEVAL_K, config.CANDIDATE_M)
+    print('检索参数配置', config.VECTOR_DIM, config.CASE_RETRIEVAL_K, config.CASE_CANDIDATE_M, config.CLAUSE_RETRIEVAL_K, config.CLAUSE_CANDIDATE_M)
     print('应用配置', config.APP_PHONE)
