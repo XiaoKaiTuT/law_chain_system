@@ -30,8 +30,9 @@ class RAGQAClient:
             response = self.llm_client.generate(query, case_chunk, clause_chunk)
             return response
         except Exception as e:
-            self.logger.error(f"RAGQA查询异常: {e}")
-            return str(e)
+            self.logger.error(f"RAG Q&A查询异常: {e}")
+            error_msg = "系统繁忙，请稍后重试"
+            return error_msg
 
 def main():
     # 创建RAGQAClient对象
@@ -45,8 +46,13 @@ def main():
             query = input("请输入问题：\n")
             if query == "exit":
                 break
-            response = rag_qa_client.query(query)
-            print(f"答案：\n{response}")
+            result = rag_qa_client.query(query)
+            if isinstance(result, str):
+                print(result)
+            else:
+                for chunk in result:
+                    print(chunk, end="", flush=True)
+                print()
         logger.info("RAG Q&A系统退出")
     except Exception as e:
         logger.error(f"RAG Q&A系统异常: {e}")

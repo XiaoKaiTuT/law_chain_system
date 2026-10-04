@@ -45,12 +45,13 @@ class Config:
         # 解析检索参数配置
         self.VECTOR_DIM = int(self.config.get('retrieval', 'vector_dim', fallback=1024))
         self.CASE_RETRIEVAL_K = int(self.config.get('retrieval', 'case_retrieval_k', fallback=5))
-        self.CASE_CANDIDATE_M = int(self.config.get('retrieval', 'case_candidate_m', fallback=2))
+        self.CASE_CANDIDATE_M = int(self.config.get('retrieval', 'case_candidate_m', fallback=3))
         self.CLAUSE_RETRIEVAL_K = int(self.config.get('retrieval', 'clause_retrieval_k', fallback=6))
         self.CLAUSE_CANDIDATE_M = int(self.config.get('retrieval', 'clause_candidate_m', fallback=4))
 
         # 解析BM25搜索配置
-        self.THRESHOLD = float(self.config.get('bm25', 'threshold', fallback=0.85))
+        self.MIN_TOP = float(self.config.get('bm25', 'min_top', fallback=22))
+        self.MIN_GAP = float(self.config.get('bm25', 'min_grap', fallback=5))
 
         # 日志文件路径
         self.LOG_FILE = os.path.join(self.LOG_DIR, self.config.get('logger', 'log_file', fallback='app.log'))
@@ -66,7 +67,7 @@ if __name__ == '__main__':
     print('MySQL配置', config.MYSQL_HOST, config.MYSQL_USER, config.MYSQL_PASSWORD, config.MYSQL_DATABASE)
     print('Redis配置', config.REDIS_HOST, config.REDIS_PORT, config.REDIS_PASSWORD, config.REDIS_DB)
     print('日志文件路径', config.LOG_FILE)
-    print('BM25搜索配置', config.THRESHOLD)
+    print('BM25搜索配置', config.MIN_TOP, config.MIN_GRAP)
     print('Milvus配置', config.MILVUS_HOST, config.MILVUS_PORT, config.MILVUS_DATA_NAME, config.MILVUS_COLLECTION_CASES, config.MILVUS_COLLECTION_ARTICLES)
     print('LLM配置', config.MODEL_NAME, config.DASHSCOPE_API_KEY, config.DASHSCOPE_BASE_URL)
     print('检索参数配置', config.VECTOR_DIM, config.CASE_RETRIEVAL_K, config.CASE_CANDIDATE_M, config.CLAUSE_RETRIEVAL_K, config.CLAUSE_CANDIDATE_M)

@@ -2,8 +2,6 @@ import os
 import sys
 import hashlib
 from pymilvus import MilvusClient, MilvusException, DataType, AnnSearchRequest, WeightedRanker
-# LoadState 在 pymilvus 2.5.4 未从顶层导出，需从 client.types 导入
-from pymilvus.client.types import LoadState
 
 current_dir: str = os.path.dirname(os.path.abspath(__file__))
 rag_qa_dir = os.path.dirname(current_dir)
@@ -250,7 +248,7 @@ class MilvusClientSystem:
         self.logger.info(f"数据插入成功")
 
     def search(
-            self, query: str|list,
+            self, query: dict,
             case_top_k: int = config.CASE_RETRIEVAL_K,
             case_top_m: int = config.CASE_CANDIDATE_M,
             clause_top_k: int = config.CLAUSE_RETRIEVAL_K,
@@ -263,10 +261,9 @@ class MilvusClientSystem:
         :return:查询到最相似的top_k数据
         """
         # 查询语句为空时返回空列表
-        if not query:
+        if not (query["rerank_query"] and query["retrieval_queries"]):
+            self.logger.warning("查询语句为空，跳过检索")
             return [], []
-
-        self._ensure_loaded()
 
         # 对于topK和topM的数量进行管控
         if case_top_k < config.CASE_RETRIEVAL_K:
@@ -283,8 +280,7 @@ class MilvusClientSystem:
             clause_top_m = config.CLAUSE_CANDIDATE_M
 
         # 统一用户问题的类型为列表
-        query = [query] if isinstance(query, str) else query
-        num = len(query)
+        query["retrieval_queries"] = [q.strip() for q in query["retrieval_queries"].strip().split("\n") if q.strip()]
 
         # 汇总查询结果
         case_chunk = []
@@ -292,7 +288,7 @@ class MilvusClientSystem:
 
         try:
             # 对每个子问题进行查询
-            for question in query:
+            for question in query["retrieval_queries"]:
                 # 混合检索(粗排)
                 query_dense, query_sparse = self.vector_tools.encode_query(question)
                 # 案情
@@ -339,70 +335,52 @@ class MilvusClientSystem:
                     output_fields=['text_content', 'title', 'source']
                 )
                 clause_result = [hit["entity"] for hit in results_clause[0]]
-
-                # 对查询结果去重
-                case_parent = self._de_weight(case_result)
-                clause_parent = self._de_weight(clause_result)
-
-                # 重排序(细排)
-                case_chunk.extend(self.reranker_tool.rerank(query=question, documents=case_parent, content_field='parent_content', top_m=max(case_top_m // num, 1)))
-                clause_chunk.extend(self.reranker_tool.rerank(query=question, documents=clause_parent, content_field='text_content', top_m=max(clause_top_m // num, 1)))
-            return case_chunk, clause_chunk
+                case_chunk.extend(case_result)
+                clause_chunk.extend(clause_result)
+            return self._recoder(case_chunk, query["rerank_query"], case_top_m), self._recoder(clause_chunk, query["rerank_query"], clause_top_m)
         except MilvusException as e:
             self.logger.error(f"Milvus 查询异常: {e}")
-            return [], []
+            raise
 
-    def _de_weight(self, results: list[dict]) -> list[dict]:
+    def _recoder(self, chunk: list, query: str, top_m: int) -> list:
         """
-        函数作用：对查询结果进行去重
-        :param results: 检索到的字典列表
-        :return: 去重后的字典列表
+        函数作用：对查询结果进行去重和重排序
+        :param chunk: 混合检索结果
+        :param query: 原始问题
+        :return: 根据top_m的数量返回重排序结果
         """
-        seen = set()
-        unique_results = []
-        for item in results:
-            content = None
-            if "parent_content" in item:
-                content = item.get("parent_content")
-            elif "text_content" in item:
-                content = item.get("text_content")
-            if content and content not in seen:
-                seen.add(content)
-                unique_results.append(item)
-        return unique_results
+        # 判断是否为空列表
+        if not chunk:
+            return []
 
-    def _ensure_loaded(self) -> None:
-        """
-        函数作用：确保集合已加载到内存（Milvus 重启后集合会被自动卸载）
+        # 去重
+        de_weight_content = []
+        de_weight_chunk = []
+        for item in chunk:
+            if "text_content" in item and item["text_content"] not in de_weight_content:
+                de_weight_content.append(item["text_content"])
+                de_weight_chunk.append(item)
+            elif "parent_content" in item and item["parent_content"] not in de_weight_content:
+                de_weight_content.append(item["parent_content"])
+                de_weight_chunk.append(item)
+            else:
+                continue
 
-        注意：判断加载状态必须用 get_load_state()，不能查 get_collection_stats() ——
-        后者只返回 row_count 之类的统计信息，没有加载状态字段。
-        """
-        for collection in (self.collection_case, self.collection_clause):
-            try:
-                state = self.client.get_load_state(collection)["state"]
-                if state != LoadState.Loaded:
-                    self.logger.warning(f"集合 {collection} 当前状态 {state!r}，重新加载")
-                    self.client.load_collection(collection)
-                    self.logger.info(f"集合 {collection} 重新加载完成")
-            except MilvusException as e:
-                self.logger.error(f"集合 {collection} 加载检查异常: {e}")
-            except Exception as e:
-                # 兜底：检查阶段失败不应拖垮整个检索（此前 KeyError 就是这么穿透的）
-                self.logger.error(f"集合 {collection} 状态检查异常: {type(e).__name__}: {e}")
+        # 重排序
+        if "text_content" in de_weight_chunk[0]:
+            return self.reranker_tool.rerank(query=query, documents=de_weight_chunk, content_field='text_content', top_m=top_m)
+        elif "parent_content" in de_weight_chunk[0]:
+            return self.reranker_tool.rerank(query=query, documents=de_weight_chunk, content_field='parent_content', top_m=top_m)
+        else:
+            self.logger.error("检索结果为空")
+            raise ValueError("检索结果为空")
+
 
     def close(self) -> None:
         """
         函数作用：关闭数据库连接
         :return: None
         """
-        try:
-            self.client.release_collection(self.collection_case)
-            self.client.release_collection(self.collection_clause)
-            self.logger.info(f"Milvus 集合释放成功")
-        except MilvusException as e:
-            self.logger.error(f"Milvus 集合释放异常: {e}")
-
         try:
             self.client.close()
             self.logger.info(f"Milvus 连接关闭成功")
@@ -415,16 +393,16 @@ if __name__ == '__main__':
     milvus_client = MilvusClientSystem()
 
     # 2. 查询用户问题
-    # query = "婚前借名购房合意不明时房屋权属认定规则"
-    query = """
-    婚前一方贷款买房婚后共同还贷离婚时如何分割
-    婚前借名购房合意不明时房屋权属如何认定
-    离婚时房产增值部分如何补偿
-    """
-    sub_queries = [q.strip() for q in query.split("\n") if q.strip()]
-    print(sub_queries)
-    result = milvus_client.search(sub_queries)
-    print(result)
+    try:
+        question = {"retrieval_queries": """"
+        婚前一方贷款买房婚后共同还贷离婚时如何分割
+        婚前借名购房合意不明时房屋权属如何认定
+        离婚时房产增值部分如何补偿
+        """, "rerank_query": "婚前借名购房合意不明时房屋权属认定规则"}
+        result = milvus_client.search(question)
+        print(result)
+    except Exception as e:
+        milvus_client.logger.error(f"milvus检索异常: {e}")
 
     # 3. 测试数据库关闭
     milvus_client.close()

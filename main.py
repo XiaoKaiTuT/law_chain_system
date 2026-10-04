@@ -1,4 +1,5 @@
 import os, sys
+import time
 
 current_dir: str = os.path.dirname(os.path.abspath(__file__))
 rag_qa_dir = os.path.dirname(current_dir)
@@ -16,6 +17,7 @@ logger = setup_logger(os.path.splitext(os.path.basename(__file__))[0])
 # LawChain项目统一入口类
 class LawChainClient:
     def __init__(self, llm=None):
+        self.logger = logger
         self.config = config
         self.redis_client = RedisClient()
         self.mysql_client = MySQLClient()
@@ -35,17 +37,17 @@ class LawChainClient:
         answer = self.redis_client.get_answer(question)
         if answer:
             logger.info(f"从缓存中获取问题答案，答案为：{answer}")
-            return answer
+            return answer + f"\n\n上述回答仅供参考。如有疑问，请联系人工客服，电话：{self.config.APP_PHONE}"
         answer = self.bm25_search.search(question)
         if answer:
             logger.info(f"从Mysql中获取问题答案，答案为：{answer}")
-            return answer
+            return answer + f"\n\n上述回答仅供参考。如有疑问，请联系人工客服，电话：{self.config.APP_PHONE}"
         # 使用LLM生成优化后的问题
         optimizer_query = self.llm_client.query_generate(question)
         # 使用Milvus进行相似度查询
         case_chunk, clause_chunk = self.milvus_client.search(optimizer_query)
-
         return self._stream_and_cache(question, case_chunk, clause_chunk)
+
 
     def _stream_and_cache(self, question: str, case_chunk: list, clause_chunk: list):
         """
@@ -67,11 +69,12 @@ class LawChainClient:
             yield error_msg
         finally:
             # 生成器被消费完毕 (或异常中断) 后，缓存完整答案
-            full_answer = "".join(chunks)
-            if full_answer:
-                logger.info("LLM流式生成完毕，缓存完整答案")
-                self.redis_client.set_question(question, full_answer)
-                self.mysql_client.insert_data([{"question": question, "answer": full_answer}])
+            # full_answer = "".join(chunks)
+            # if full_answer:
+            #     logger.info("LLM流式生成完毕，缓存完整答案")
+            #     self.redis_client.set_question(question, full_answer)
+            #     self.mysql_client.insert_data([{"question": question, "answer": full_answer}])
+            pass
 
     def close(self) -> None:
         self.redis_client.close()
@@ -90,6 +93,7 @@ def main():
                 logger.info("退出LawChain Q&A系统")
                 print("感谢使用LawChain Q&A系统")
                 break
+            start = time.time()
             result = system.search(query)
             if isinstance(result, str):
                 print(result)
@@ -97,6 +101,7 @@ def main():
                 for chunk in result:
                     print(chunk, end="", flush=True)
                 print()
+            system.logger.info(f"耗时：{time.time() - start:.2f}")
     except Exception as e:
         logger.error(f"系统错误: {e}")
     finally:

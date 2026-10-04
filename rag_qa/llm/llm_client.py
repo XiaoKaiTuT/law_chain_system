@@ -66,21 +66,23 @@ class LLMClient:
             self.logger.error(f"检索分类异常: {e}")
             return "direct"
 
-    def query_generate(self, query: str) -> str|list:
+    def query_generate(self, query: str) -> dict:
         """
         函数功能：根据用户问题，生成优化后的问题，有利于提高检索效率
         :param query: 用户问题
-        :return: 优化后的问题
+        :return: 字典形式：{优化后的问题，原问题}
         """
         SEARCH_PATTERN = {
             "hyde": self.rag_prompts.hyde_search(),
             "subquery": self.rag_prompts.subquery_search(),
             "recall": self.rag_prompts.recall_search(),
         }
+        question = {"retrieval_queries": None, "rerank_query": query}
         try:
             classification = self._search_classification(query)
             if classification not in SEARCH_PATTERN:
-                return query
+                question["retrieval_queries"] = query
+                return question
             prompt = SEARCH_PATTERN[classification].format(query=query)
             response = self.llm.chat.completions.create(
                 model=self.config.MODEL_NAME,
@@ -90,11 +92,14 @@ class LLMClient:
             )
             result = response.choices[0].message.content
             if classification == "subquery":
-                return [q.strip() for q in result.strip().split("\n") if q.strip()]
-            return result
+                question["retrieval_queries"] = result
+                return question
+            question["retrieval_queries"] = result
+            return question
         except Exception as e:
             self.logger.error(f"生成优化问题异常: {e}")
-            return query
+            question["retrieval_queries"] = query
+            return question
 
     def generate(self, query: str, case: list[dict]|None = None, legal_provision: list[dict]|None = None, history: list|None = None):
         """
@@ -158,13 +163,16 @@ if __name__ == '__main__':
     # case = "《中华人民共和国民法典》第一千零八十四条：父母与子女间的关系，不因父母离婚而消除。离婚后，子女无论由父或者母直接抚养，仍是父母双方的子女。离婚后，父母对于子女仍有抚养、教育、保护的权利和义务。"
     # print(llm_client.generate(query, case))
 
-    query_list = [
-        "离婚冷静期是多久？",
-        "甲借给乙10万没打欠条，只有微信转账记录，乙能要回来吗？",
-        "婚前一方贷款买房，婚后共同还贷，离婚时房屋权属如何认定、共同还贷部分如何补偿、增值部分如何分割？",
-        "我在工厂上了五年班了，厂里一直让我签劳务派遣合同但实际在正式岗位上班，上个月突然把我辞了也没给补偿，我该怎么维权？"
-    ]
-    for query in query_list:
-        result = llm_client.query_generate(query)
-        print(result)
+    query = "离婚案件中，孩子选择跟随生活的一方条件比另一方差很多，应如何处理？"
+    print(llm_client.query_generate(query))
+
+    # query_list = [
+    #     "离婚冷静期是多久？",
+    #     "甲借给乙10万没打欠条，只有微信转账记录，乙能要回来吗？",
+    #     "婚前一方贷款买房，婚后共同还贷，离婚时房屋权属如何认定、共同还贷部分如何补偿、增值部分如何分割？",
+    #     "我在工厂上了五年班了，厂里一直让我签劳务派遣合同但实际在正式岗位上班，上个月突然把我辞了也没给补偿，我该怎么维权？"
+    # ]
+    # for query in query_list:
+    #     result = llm_client.query_generate(query)
+    #     print(result)
 
