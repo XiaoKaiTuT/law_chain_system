@@ -126,7 +126,7 @@
 law_chain_system/
 ├── main.py                       # ★ 统一入口：LawChainClient（多级检索链 + 流式）
 ├── config.ini                    # ★ 全局配置（数据库/模型/检索参数）
-├── requirments.txt               # 依赖清单（注意：文件名拼写 & 编码问题，见「已知问题」）
+├── requirements.txt              # 依赖清单（UTF-8）
 ├── 优化项.md                      # 迭代待办清单（含 BM25 归一化问题的分析）
 │
 ├── base/                         # 基础设施
@@ -501,9 +501,7 @@ huggingface-cli download BAAI/bge-reranker-large  --local-dir rag_qa/models/bge-
 conda create -n law_rag python=3.10 -y
 conda activate law_rag
 
-# ⚠️ requirments.txt 是 UTF-16LE 编码，Linux/macOS 下直接安装会报错，
-#    请先转成 UTF-8（见「已知问题」第 2 条）
-pip install -r requirments.txt
+pip install -r requirements.txt
 ```
 
 ### 4. 配置
@@ -669,10 +667,9 @@ python mysql_qa/main.py    # 启动后直接 exit 即可
 | # | 问题 | 说明 | 建议 |
 |---|------|------|------|
 | 1 | **模型权重合计约 10.7 GB** | `bge-m3` ~4.3 GB（`pytorch_model.bin` 2.17 GB + `onnx/model.onnx_data` 2.16 GB）；**v2 新增 `bge-reranker-large` ~6.4 GB**（`pytorch_model.bin` 2.14 GB + `model.safetensors` 2.14 GB 两份等价权重并存） | 已在 `.gitignore` 排除 `rag_qa/models/`；README 提供下载命令。若确需入库请用 **Git LFS**（单文件 >100 MB GitHub 直接拒绝）。可先删掉 `onnx/` 与重复的 `.safetensors` 省一半体积 |
-| 2 | **`requirments.txt` 是 UTF-16LE** | Windows `pip freeze` 的产物，带 BOM；Linux/macOS 下 `pip install -r` 会解析失败；且文件名拼写错误（应为 `requirements`） | 转成 UTF-8 并重命名；建议精简为直接依赖 |
-| 3 | **明文密码入库** | `config.ini` 含 MySQL `123456`、Redis `1234`；`base/config.py` 把它们写成了代码 fallback 默认值 | 移除代码里的明文默认值，改用 `.env` + `python-dotenv`，并提供 `.env.example` |
-| 4 | **依赖清单是整环境快照** | 约 250 个包，包含大量与本项目无关的传递依赖（langchain 全家桶、ragas、kubernetes 等） | 按直接依赖重写，或用 `pipreqs` 生成 |
-| 5 | **`common/data/` 有 79 MB 语料** | 24 个案例 PDF + 19 个法条 + 问答 Excel | 若版权/体积敏感，改放外部下载链接 |
+| 2 | **明文密码入库** | `config.ini` 含 MySQL `123456`、Redis `1234`；`base/config.py` 把它们写成了代码 fallback 默认值 | 移除代码里的明文默认值，改用 `.env` + `python-dotenv`，并提供 `.env.example` |
+| 3 | **依赖清单是整环境快照** | 212 个包，包含大量与本项目无关的传递依赖（langchain 全家桶、ragas、kubernetes 等） | 按直接依赖重写，或用 `pipreqs` 生成 |
+| 4 | **`common/data/` 有 79 MB 语料** | 24 个案例 PDF + 19 个法条 + 问答 Excel | 若版权/体积敏感，改放外部下载链接 |
 
 ### 🟡 代码层面的已知缺陷
 
@@ -680,32 +677,32 @@ python mysql_qa/main.py    # 启动后直接 exit 即可
 
 | # | 位置 | 问题 |
 |---|------|------|
-| 6 | `milvus_client.py` 配额分配 | `top_m=max(case_top_m // num, 1)`：`subquery` 拆出 3 个子问题时，案例 `3//3=1`、条款 `4//3=1`，**最终条数反而少于单查询**（应为 3/4）。配额分配逻辑需要重新设计。 |
-| 7 | `llm_client.py:97-99` | **异常退化为"没问题"**：`query_generate()` 出错时 `return query`（原问题），调用方无法区分"分类为 direct"与"分类失败"，检索质量静默下降。 |
-| 8 | `llm_client.py:110-111` | **兜底有副作用**：`generate()` 在无上下文时 `yield` 一句提示后 `return`，该提示会被 `_stream_and_cache` 累积并写入缓存，导致"信息不足"被当成有效答案缓存起来。 |
-| 9 | `milvus_client.py` 异常处理 | `search()` 里 `except MilvusException` 直接 `return [], []`，**静默吞掉检索失败**；调用方无法区分"没检索到"与"检索报错"。 |
-| 10 | 意图分类的额外开销 | 每次未命中缓存的问题都要**多一次 LLM 调用**做分类（实测 2.3s）；`hyde`/`subquery`/`recall` 还要**再一次**做改写。可考虑分类结果缓存或与改写合并为一次调用。 |
-| 11 | `llm_client.py:12` | **未使用导入 + 循环依赖隐患**：导入了 `MilvusClientSystem` 但全文未使用；而 `milvus_client.py` 会反向引用 LLM 模块，存在循环导入风险。 |
+| 5 | `milvus_client.py` 配额分配 | `top_m=max(case_top_m // num, 1)`：`subquery` 拆出 3 个子问题时，案例 `3//3=1`、条款 `4//3=1`，**最终条数反而少于单查询**（应为 3/4）。配额分配逻辑需要重新设计。 |
+| 6 | `llm_client.py:97-99` | **异常退化为"没问题"**：`query_generate()` 出错时 `return query`（原问题），调用方无法区分"分类为 direct"与"分类失败"，检索质量静默下降。 |
+| 7 | `llm_client.py:110-111` | **兜底有副作用**：`generate()` 在无上下文时 `yield` 一句提示后 `return`，该提示会被 `_stream_and_cache` 累积并写入缓存，导致"信息不足"被当成有效答案缓存起来。 |
+| 8 | `milvus_client.py` 异常处理 | `search()` 里 `except MilvusException` 直接 `return [], []`，**静默吞掉检索失败**；调用方无法区分"没检索到"与"检索报错"。 |
+| 9 | 意图分类的额外开销 | 每次未命中缓存的问题都要**多一次 LLM 调用**做分类（实测 2.3s）；`hyde`/`subquery`/`recall` 还要**再一次**做改写。可考虑分类结果缓存或与改写合并为一次调用。 |
+| 10 | `llm_client.py:12` | **未使用导入 + 循环依赖隐患**：导入了 `MilvusClientSystem` 但全文未使用；而 `milvus_client.py` 会反向引用 LLM 模块，存在循环导入风险。 |
 
 **v1 遗留未修**
 
 | # | 位置 | 问题 |
 |---|------|------|
-| 12 | `mysql_qa/main.py:75-81` | **契约不匹配（功能性 bug）**：`BM25Search.search()` 返回 `str \| None`，但 `MySQLQASystem.search()` 按 `list[dict]` 处理（`for answer in answers: if "question" in answer`）。字符串会被逐**字符**迭代，`in` 判断恒为 False，导致"MySQL 命中 → 回填 Redis 缓存"**从未生效**；若返回 `None` 则抛 `TypeError` 被静默吞掉。**注：实际使用的 `LawChainClient`（根 `main.py`）调用方式正确，不受影响。** |
-| 13 | `bm25_search.py:79-84` | **阈值几乎不可能命中**：`softmax` 归一化后榜首分数随语料规模迅速衰减，默认 `threshold=0.85` 在语料稍大时永远达不到，BM25 层形同废用；softmax 也抹掉了 BM25 原始分的绝对意义。**`优化项.md` 已记录改法**（改原始分 + 绝对阈值 + 与次高分的 gap 判断）。 |
-| 14 | `llm_client.py:25-44` | **异常被吞**：`_init_llm` 捕获所有异常且**不重新抛出**，失败时 `self.llm` 保持 `None`，故障延迟到首次提问才暴露。 |
-| 15 | `milvus_client.py:38` | **初始化失败即全站不可用**：`MilvusClientSystem` 构造失败会抛出，`LawChainClient` 随之失败，FastAPI 无法启动（页面也打不开）。建议把 Milvus 做成可降级组件。 |
-| 16 | `bm25_search.py` / `redis_client.py` | **连接泄漏**：`BM25Search` 自建 `MySQLClient` 却**没有 `close()`**；`LawChainClient.close()` 也未关闭它。`redis.Redis()` 是惰性连接，`__init__` 里的 `except redis.RedisError` 基本捕获不到连接失败。 |
-| 17 | `mysql_client.py` | **硬编码库名**：`insert_data` 里写死 `law_chain.law_qa` / `law_chain.law_chunk`；若 `MYSQL_DATABASE` 配置不同则直接失败。 |
-| 18 | 唯一键设计 | `uk_question(question(255))` / `uk_chunk(source, text_content(255))` 配合 `insert ignore`，会**静默丢弃**前 255 字相同的不同问题/长法条，且无告警。 |
-| 19 | `doc_loader.py:84` | **`break` 应为 `continue`**：目录遍历时遇到一个无法推断用途的文件就 `break`，会**直接放弃该目录下所有剩余文件**。对 `common/data` 这种混合目录是真实的数据丢失风险。 |
-| 20 | `milvus_client.py:215,229` | **按字节截断中文**：`text_content.encode('utf-8')[:4000].decode('utf-8')` 若切在汉字中间会抛 `UnicodeDecodeError`；而 `VARCHAR(4000)` 本身按字符计长，这层截断既多余又错误。 |
-| 21 | `embedding.py` / `reranker.py` | **模型无单例，重复加载**：两个工具类都在构造时立即加载数 GB 权重，`MilvusClientSystem` 与各测试脚本每次实例化都会重新加载。 |
-| 22 | `llm_client.py:39-41` | **接口协议不一致**：自定义 LLM 用 `hasattr(llm, 'invoke')`（LangChain 风格）校验，实际却调用 `llm.chat.completions.create`（OpenAI 风格），传 LangChain 对象必然运行时报错。 |
-| 23 | `llm_client.py` | **命名误导 + 参数缺失**：变量名 `DASHSCOPE_*` 实际指向 DeepSeek 后端；调用时**无 system prompt、未设 `temperature` / `max_tokens`**，输出稳定性不可控。 |
-| 24 | `milvus_client.py:38` | **初始化有写库副作用**：`__init__` 里的 `_init_data()` 在集合为空时会自动从 MySQL 灌数据进 Milvus，让"构造对象"变成重操作。 |
-| 25 | `law_text_spliter/main.py:18,30` | 测试入口路径 `r"/common/utils/test_data\..."` 写法错误（号称绝对路径却缺盘符）。 |
-| 26 | `doc_loader.py:97` / `doc_spliter.py:40` | 测试代码硬编码开发机绝对路径 `D:\develop\...`，影响可移植性。 |
+| 11 | `mysql_qa/main.py:75-81` | **契约不匹配（功能性 bug）**：`BM25Search.search()` 返回 `str \| None`，但 `MySQLQASystem.search()` 按 `list[dict]` 处理（`for answer in answers: if "question" in answer`）。字符串会被逐**字符**迭代，`in` 判断恒为 False，导致"MySQL 命中 → 回填 Redis 缓存"**从未生效**；若返回 `None` 则抛 `TypeError` 被静默吞掉。**注：实际使用的 `LawChainClient`（根 `main.py`）调用方式正确，不受影响。** |
+| 12 | `bm25_search.py:79-84` | **阈值几乎不可能命中**：`softmax` 归一化后榜首分数随语料规模迅速衰减，默认 `threshold=0.85` 在语料稍大时永远达不到，BM25 层形同废用；softmax 也抹掉了 BM25 原始分的绝对意义。**`优化项.md` 已记录改法**（改原始分 + 绝对阈值 + 与次高分的 gap 判断）。 |
+| 13 | `llm_client.py:25-44` | **异常被吞**：`_init_llm` 捕获所有异常且**不重新抛出**，失败时 `self.llm` 保持 `None`，故障延迟到首次提问才暴露。 |
+| 14 | `milvus_client.py:38` | **初始化失败即全站不可用**：`MilvusClientSystem` 构造失败会抛出，`LawChainClient` 随之失败，FastAPI 无法启动（页面也打不开）。建议把 Milvus 做成可降级组件。 |
+| 15 | `bm25_search.py` / `redis_client.py` | **连接泄漏**：`BM25Search` 自建 `MySQLClient` 却**没有 `close()`**；`LawChainClient.close()` 也未关闭它。`redis.Redis()` 是惰性连接，`__init__` 里的 `except redis.RedisError` 基本捕获不到连接失败。 |
+| 16 | `mysql_client.py` | **硬编码库名**：`insert_data` 里写死 `law_chain.law_qa` / `law_chain.law_chunk`；若 `MYSQL_DATABASE` 配置不同则直接失败。 |
+| 17 | 唯一键设计 | `uk_question(question(255))` / `uk_chunk(source, text_content(255))` 配合 `insert ignore`，会**静默丢弃**前 255 字相同的不同问题/长法条，且无告警。 |
+| 18 | `doc_loader.py:84` | **`break` 应为 `continue`**：目录遍历时遇到一个无法推断用途的文件就 `break`，会**直接放弃该目录下所有剩余文件**。对 `common/data` 这种混合目录是真实的数据丢失风险。 |
+| 19 | `milvus_client.py:215,229` | **按字节截断中文**：`text_content.encode('utf-8')[:4000].decode('utf-8')` 若切在汉字中间会抛 `UnicodeDecodeError`；而 `VARCHAR(4000)` 本身按字符计长，这层截断既多余又错误。 |
+| 20 | `embedding.py` / `reranker.py` | **模型无单例，重复加载**：两个工具类都在构造时立即加载数 GB 权重，`MilvusClientSystem` 与各测试脚本每次实例化都会重新加载。 |
+| 21 | `llm_client.py:39-41` | **接口协议不一致**：自定义 LLM 用 `hasattr(llm, 'invoke')`（LangChain 风格）校验，实际却调用 `llm.chat.completions.create`（OpenAI 风格），传 LangChain 对象必然运行时报错。 |
+| 22 | `llm_client.py` | **命名误导 + 参数缺失**：变量名 `DASHSCOPE_*` 实际指向 DeepSeek 后端；调用时**无 system prompt、未设 `temperature` / `max_tokens`**，输出稳定性不可控。 |
+| 23 | `milvus_client.py:38` | **初始化有写库副作用**：`__init__` 里的 `_init_data()` 在集合为空时会自动从 MySQL 灌数据进 Milvus，让"构造对象"变成重操作。 |
+| 24 | `law_text_spliter/main.py:18,30` | 测试入口路径 `r"/common/utils/test_data\..."` 写法错误（号称绝对路径却缺盘符）。 |
+| 25 | `doc_loader.py:97` / `doc_spliter.py:40` | 测试代码硬编码开发机绝对路径 `D:\develop\...`，影响可移植性。 |
 
 ### 🔵 功能待完善
 
