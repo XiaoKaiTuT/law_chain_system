@@ -25,7 +25,7 @@ class RerankerTools:
             self.logger.error(f"重排序初始化错误: {e}")
             raise
 
-    def rerank(self, query: str, documents:list[dict], content_field: str, top_m: int = 3):
+    def rerank(self, query: str, documents:list[dict], content_field: str, top_m: int = 3) -> list[dict]:
         """
         函数功能：对文档进行重排序
         :param query: 需要查询的文本
