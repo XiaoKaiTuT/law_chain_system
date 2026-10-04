@@ -19,7 +19,8 @@ logger = setup_logger(os.path.splitext(os.path.basename(__file__))[0])
 class BM25Search:
     def __init__(self):
         self.logger = logger                    # 日志
-        self.threshold = config.THRESHOLD       # 阈值
+        self.min_top = config.MIN_TOP           # 阈值
+        self.min_gap = config.MIN_GAP         # 次阈值
         self.mysql_client = MySQLClient()       # MySQL客户端
         self.bm25 = None                        # 初始化BM25
         self.mapping_table = None               # 初始化Mysql映射表
@@ -51,17 +52,6 @@ class BM25Search:
             self.logger.error(f"BM25初始化异常: {e}")
             raise
 
-    @staticmethod
-    def _softmax(scores: list) -> list:
-        """
-        函数功能：对分数进行softmax处理
-        :param scores: 原始分数列表
-        :return: 概率列表
-        """
-        scores = np.array(scores)
-        exp_scores = np.exp(scores - scores.max())
-        return exp_scores / exp_scores.sum()
-
     def search(self, query: str) -> str | None:
         """
         函数功能：根据用户问题进行bm25检索
@@ -76,12 +66,13 @@ class BM25Search:
 
         query_word = preprocess_text(query)
         scores = self.bm25.get_scores(query_word)
-        scores = self._softmax(scores)
 
         # 检测最大分数是否超过阈值
+        sorted_scores = sorted(scores, reverse=True)
         max_index = np.argmax(scores)
         max_score = scores[max_index]
-        if max_score >= self.threshold:
+        second_score = np.array(sorted_scores[1]) if len(sorted_scores) > 1 else 0
+        if max_score >= self.min_top and max_score - second_score >= self.min_gap:
             mapping = self.mapping_table[max_index]
             answer = self.mysql_client.get_chunks_by_ids([mapping])
             self.logger.info(f"查询到满足阈值的结果: scores: {max_score: .4f}, answer: {answer}")
