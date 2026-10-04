@@ -42,6 +42,7 @@ class LLMClient:
             self.logger.info("LLM初始化成功")
         except Exception as e:
             self.logger.error(f"LLM初始化失败: {e}")
+            raise
 
     def _search_classification(self, query: str) -> str:
         """
