@@ -5,7 +5,7 @@ current_dir: str = os.path.dirname(os.path.abspath(__file__))
 project_dir = os.path.dirname(current_dir)
 if project_dir not in sys.path:
     sys.path.insert(0, project_dir)
-from base import setup_logger
+from base import setup_logger, config
 from main import LawChainClient
 
 from contextlib import asynccontextmanager
@@ -27,20 +27,59 @@ logger = setup_logger(os.path.splitext(os.path.basename(__file__))[0])
 HEARTBEAT_INTERVAL = 30      # 心跳间隔（秒）
 HEARTBEAT_MAX_MISS = 2       # 连续多少个心跳窗口没收到任何帧就判定断线
 
+# 免责声明由后端（main.py）在判定为法律问题后统一拼接：
+#   - 只加在法律回答上，日常问答不加（问候、闲聊加免责声明既生硬也不合适）
+#   - 且在写入缓存之后才推送，保证 Redis / MySQL 里只存核心答案
+#   - law_qa 表同时是 BM25 的检索语料，样板文字混入会污染 IDF
+# 因此本层（WebSocket 推送）不再处理免责声明。
+
 # 单例：由 lifespan 创建 / 关闭
 law_chain = None
+
+# 后台预热任务：必须持有引用，否则任务可能被垃圾回收而中途消失
+warmup_task = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动时初始化检索链，关闭时释放资源"""
-    global law_chain
+    global law_chain, warmup_task
     logger.info("正在初始化 LawChainClient ...")
     law_chain = LawChainClient()
     logger.info("LawChainClient 初始化完成")
+
+    # ------------------------------------------------------------------
+    # 后台预热：bge-m3 与 bge-reranker 都是懒加载（构造时不加载，首次调用才加载），
+    # 这里在后台主动触发一次，让加载发生在服务启动阶段而不是用户的请求里。
+    #
+    # 三个要点：
+    #   1) 不 await 它 —— await 会阻塞启动，等于退回"饿汉式"
+    #   2) 用 asyncio.to_thread —— warmup() 是同步阻塞的 CPU/GPU 操作，
+    #      直接调用会卡住事件循环，导致心跳发不出去
+    #   3) 失败只记 warning —— 预热是可选优化，不能拖垮核心功能
+    # ------------------------------------------------------------------
+    async def _warmup():
+        try:
+            await asyncio.to_thread(law_chain.warmup)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"模型预热失败（不影响服务使用）：{e}", exc_info=True)
+
+    warmup_task = asyncio.create_task(_warmup())
+    logger.info("已启动后台模型预热（不阻塞服务启动）")
+
     try:
         yield
     finally:
+        # 预热任务如果不取消，可能在事件循环关闭后仍在运行，导致报错
+        if warmup_task is not None and not warmup_task.done():
+            warmup_task.cancel()
+            try:
+                await warmup_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            logger.info("后台预热任务已取消")
+        warmup_task = None
+
         try:
             law_chain.close()
             logger.info("LawChainClient 已关闭")
@@ -138,6 +177,8 @@ async def stream_answer(ws: WebSocket, result) -> None:
         return
 
     # 2) 非流式：一次性发完
+    #    走到这里的是"缓存命中 / BM25 命中"的完整文本，
+    #    其中已由后端（main.py 的 _with_disclaimer）按需附加了免责声明。
     if not inspect.isgenerator(result):
         text = result if result else "（没有返回内容）"
         await send_json(ws, {"type": "answer_delta", "text": text})

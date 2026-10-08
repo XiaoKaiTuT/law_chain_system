@@ -1,4 +1,5 @@
 from openai import OpenAI
+from typing import Iterator
 import os
 import sys
 
@@ -9,9 +10,17 @@ if project_dir not in sys.path:
     sys.path.insert(0, project_dir)
 from base import config, setup_logger
 from rag_qa.prompt.template import RAGPrompts
-from rag_qa.db.milvus_client import MilvusClientSystem
 logger = setup_logger(os.path.splitext(os.path.basename(__file__))[0])
 
+class InsufficientContextError(Exception):
+    """
+    函数目的：检索没有拿到可用上下文，无法生成答案
+    """
+
+class GenerationError(Exception):
+    """
+    函数目的：LLM调用或流式生成过程中失败
+    """
 
 # LLM客户端类
 class LLMClient:
@@ -58,11 +67,12 @@ class LLMClient:
                     {"role": "user", "content": prompt}
                 ]
             )
-            if response.choices[0].message.content.strip().lower() not in ["direct", "hyde", "subquery", "recall"]:
-                self.logger.warning(f"检索分类异常：{response.choices[0].message.content}，将使用直接检索方式。")
+            answer = response.choices[0].message.content
+            if answer.strip().lower() not in ["direct", "hyde", "subquery", "recall"]:
+                self.logger.warning(f"检索分类异常：{answer}，将使用直接检索方式。")
                 return "direct"
-            self.logger.info(f"检索分类成功：{response.choices[0].message.content}")
-            return response.choices[0].message.content.strip().lower()
+            self.logger.info(f"检索分类成功：{answer}")
+            return answer.strip().lower()
         except Exception as e:
             self.logger.error(f"检索分类异常: {e}")
             return "direct"
@@ -102,7 +112,7 @@ class LLMClient:
             question["retrieval_queries"] = query
             return question
 
-    def generate(self, query: str, case: list[dict]|None = None, legal_provision: list[dict]|None = None, history: list|None = None):
+    def generate(self, query: str, case: list[dict]|None = None, legal_provision: list[dict]|None = None, history: list|None = None) -> Iterator[str]:
         """
         函数功能：根据用户问题，检索到的上下文
         :param query: 用户问题
@@ -112,8 +122,10 @@ class LLMClient:
         :return: 回答
         """
         if not query or not (case or legal_provision):
-            yield f"信息不足，无法回答。\n如有问题请联系人工客服，电话：{self.config.APP_PHONE}"
-            return
+            raise InsufficientContextError(
+                f"检索未获得可用上下文 (case={len(case) if case else 0})，"
+                f"clause={len(legal_provision) if legal_provision else 0}"
+            )
 
         try:
             # 处理优化case与legal_provision
@@ -134,10 +146,31 @@ class LLMClient:
                 delta = chunk.choices[0].delta.content
                 if delta:
                     yield delta
-            yield f"\n\n上述回答仅供参考。如有疑问，请联系人工客服，电话：{self.config.APP_PHONE}"
         except Exception as e:
-            self.logger.error(f"LLM生成异常: {e}")
-            yield f"抱歉，系统出现问题。如有疑问，请拨打人工客服，电话：{self.config.APP_PHONE}"
+            self.logger.error(f"LLM生成异常: {e}", exc_info=True)
+            raise GenerationError(f'LLM 生成失败: {e}') from e
+
+    def generate_general(self, query: str) -> Iterator[str]:
+        """
+        函数功能：通用问答，不检索知识库，直接用LLM回答非法律问题
+        :param query: 用户问题
+        :return: 流式回答
+        """
+        prompt = self.rag_prompts.general_prompt().format(query=query)
+        try:
+            response = self.llm.chat.completions.create(
+                model=self.config.MODEL_NAME,
+                messages=[{"role": "user", "content": prompt}],
+                stream=True,
+            )
+            for chunk in response:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    yield delta
+        except Exception as e:
+            self.logger.error(f"通用问答生成异常: {e}", exc_info=True)
+            raise GenerationError(f"通用问答生成失败: {e}") from e
+
 
     @staticmethod
     def _format_context(documents: list[dict], content_field: str) -> str:

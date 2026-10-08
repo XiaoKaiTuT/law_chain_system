@@ -5,7 +5,7 @@ class RAGPrompts:
     @staticmethod
     def rag_prompt() -> PromptTemplate:
         """
-        函数功能：直接检索。直接根据上下文和问题生成答案。
+        函数功能：rag模版。直接根据上下文和问题生成答案。
         :return: PromptTemplate对象，直接检索提示词模板
         """
         return PromptTemplate(
@@ -166,6 +166,57 @@ class RAGPrompts:
             """,
             input_variables=["query"]
         )
+
+    @staticmethod
+    def general_prompt() -> PromptTemplate:
+        """
+        函数功能：通用问答提示词模板。用于非法律问题，不检索知识库，直接由 LLM 回答。
+        :return: PromptTemplate对象，通用问答提示词模板
+        """
+        return PromptTemplate(
+            template="""
+            你是一个友好、简洁的LawChain智能小助手，负责回答日常问题。
+            
+            要求：
+            1. 直接回答用户问题，简洁准确，不要长篇大论
+            2. 不知道或者不确定的，明确说不知道，不要编写。
+            3. 如果问题涉及到法律、法规、诉讼、合同、劳动、婚姻、继承、侵犯、刑事等法律领域，不要尝试回答，只回复：[这属于专业法律问题，建议咨询专业律师或使用法律咨询功能]
+            4. 不要输出与问题无关的免责声明或客套话
+            5. 如果问题涉及到日常打招呼，回复类似引导型内容，例如：[你好，我是LawChain智能小助手，有什么需要我的帮助吗？]
+            6. 如果涉及到用途，你要给予3~4个问题，去引导用户询问法律相关的问题，引导问题要偏日常，最常见的，例如：[我可以帮你查询法律相关的问题，你可以问我：1.xxx\n2.xxx...]
+            
+            问题：{query}
+            回答：
+            """,
+            input_variables=["query"]
+        )
+
+    @staticmethod
+    def insufficient_answer(phone: str) -> str:
+        """
+        函数功能：检索未获得可用上下文时的兜底文案 (不经过LLM直接返回)
+        :param phone: 客服电话
+        :return: 提示文案
+        """
+        return f"信息不足，无法回答。\n如有问题请联系人工客服，电话：{phone}"
+
+    @staticmethod
+    def system_error_answer(phone: str) -> str:
+        """
+        函数功能：系统/LLM 异常时的兜底文案 (不经过 LLM，直接返回)
+        :param phone: 客服电话
+        :return: 提示文案
+        """
+        return f"抱歉，系统出现问题。如有疑问，请联系人工客服，电话：{phone}"
+
+    @staticmethod
+    def disclaimer(phone: str) -> str:
+        """
+        函数功能：统一的免责声明后缀
+        :param phone: 客服电话
+        :return: 提示文案
+        """
+        return f"\n\n上述回答仅供参考。如有疑问，请联系人工客服，电话：{phone}"
         
 
 # TODO 测试代码
