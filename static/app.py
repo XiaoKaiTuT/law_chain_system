@@ -18,6 +18,7 @@ from starlette.requests import Request
 import asyncio
 import inspect
 import json
+import uuid
 
 logger = setup_logger(os.path.splitext(os.path.basename(__file__))[0])
 
@@ -26,6 +27,15 @@ logger = setup_logger(os.path.splitext(os.path.basename(__file__))[0])
 # ============================================================================
 HEARTBEAT_INTERVAL = 30      # 心跳间隔（秒）
 HEARTBEAT_MAX_MISS = 2       # 连续多少个心跳窗口没收到任何帧就判定断线
+
+# 会话 ID：由【服务端】在连接建立时生成，避免前端篡改后读取他人历史。
+# 用 uuid4 取前 16 位十六进制（16^16 ≈ 1.8e19 种，碰撞概率可忽略，且比完整 UUID 好读）。
+SESSION_ID_LEN = 16
+
+
+def new_session_id() -> str:
+    """生成一个会话 ID"""
+    return uuid.uuid4().hex[:SESSION_ID_LEN]
 
 # 免责声明由后端（main.py）在判定为法律问题后统一拼接：
 #   - 只加在法律回答上，日常问答不加（问候、闲聊加免责声明既生硬也不合适）
@@ -219,17 +229,56 @@ async def stream_answer(ws: WebSocket, result) -> None:
     await send_json(ws, {"type": "answer_end"})
 
 
-async def handle_question(ws: WebSocket, question: str) -> None:
-    """处理一次提问"""
+async def handle_question(ws: WebSocket, question: str, session_id: str = "") -> None:
+    """处理一次提问（支持多轮：先从 Redis 取该会话历史，再交给检索链）"""
     question = (question or "").strip()
     if not question:
         await send_json(ws, {"type": "answer", "text": "消息为空，请重新输入有效问题 QAQ"})
         return
 
-    logger.info(f"开始处理用户问题：{question}")
+    logger.info(f"开始处理用户问题：{question}（session={session_id or '无'}）")
+
+    # 阶段帧的桥接：search() 跑在工作线程里，通过 stage() 把阶段文案塞进队列，
+    # 事件循环这边边等边把阶段推给前端。与 stream_answer 的"线程推队列"是同一套路。
+    stage_q: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def stage(text: str, _q=stage_q, _loop=loop) -> None:
+        try:
+            _loop.call_soon_threadsafe(_q.put_nowait, text)
+        except RuntimeError:
+            pass          # 事件循环已关闭，忽略
+
+    async def pump_search():
+        """在线程池里跑检索链，同时把阶段帧按顺序推给前端"""
+        task = asyncio.create_task(
+            asyncio.to_thread(law_chain.search, question, history, session_id, stage)
+        )
+        try:
+            while True:
+                get_task = asyncio.create_task(stage_q.get())
+                done, _ = await asyncio.wait(
+                    {task, get_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if get_task in done:
+                    await send_json(ws, {"type": "stage", "text": get_task.result()})
+                    continue
+                # 检索链已结束：把队列里剩余的阶段帧排空后返回结果
+                get_task.cancel()
+                while not stage_q.empty():
+                    await send_json(ws, {"type": "stage", "text": stage_q.get_nowait()})
+                return task.result()
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+
+    # ★ 从 Redis 读取该会话的历史（不存在或出错时返回空列表，退化为单轮）
+    history = law_chain.redis_client.get_conversation(session_id) if session_id else []
+    if history:
+        logger.info(f"读取到会话历史 {len(history)} 条")
+
     try:
-        # 检索链是同步阻塞的，必须放到线程池，否则心跳会被拖死
-        result = await asyncio.to_thread(law_chain.search, question)
+        result = await pump_search()
     except Exception as e:  # noqa: BLE001
         logger.error(f"检索链处理异常：{e}", exc_info=True)
         await send_json(ws, {"type": "error", "text": f"检索出错了 QAQ：{e}"})
@@ -251,7 +300,7 @@ async def handle_question(ws: WebSocket, question: str) -> None:
 # ============================================================================
 # 接收循环（唯一的读取者）
 # ============================================================================
-async def receive_loop(ws: WebSocket, state: ConnState) -> None:
+async def receive_loop(ws: WebSocket, state: ConnState, session_id: str = "") -> None:
     """
     统一处理三类消息：question / ping / pong。
     收到非 JSON 纯文本时按提问处理（兼容旧客户端）。
@@ -276,7 +325,7 @@ async def receive_loop(ws: WebSocket, state: ConnState) -> None:
         else:
             text = payload.get("text") or payload.get("question") or ""
             logger.info(f"收到用户信息: {text}")
-            await handle_question(ws, text)
+            await handle_question(ws, text, session_id)
 
 
 # ============================================================================
@@ -295,11 +344,17 @@ async def health():
 @app.websocket("/ws/chat")
 async def websocket_chat(ws: WebSocket):
     await ws.accept()
-    logger.info("用户建立连接")
+    # ★ 每次连接生成一个新的会话 ID（会话边界 = 一条 WebSocket 连接）
+    session_id = new_session_id()
+    logger.info(f"用户建立连接，session={session_id}")
+
+    # 先推给前端，后续提问会带着它回来（前端刷新后即换新会话）
+    await send_json(ws, {"type": "session", "session_id": session_id})
+
     state = ConnState()
     hb = asyncio.create_task(heartbeat_loop(ws, state))
     try:
-        await receive_loop(ws, state)
+        await receive_loop(ws, state, session_id)
     except WebSocketDisconnect:
         logger.info("用户断开连接")
     except Exception as e:  # noqa: BLE001
@@ -310,6 +365,12 @@ async def websocket_chat(ws: WebSocket):
             await hb
         except asyncio.CancelledError:
             pass
+        # ★ 清理该会话的历史（会话随连接结束而结束，不必等 TTL）
+        try:
+            law_chain.redis_client.delete_conversation(session_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"清理会话历史失败（不影响使用）：{e}")
+        logger.info(f"连接已关闭，session={session_id}")
 
 
 if __name__ == '__main__':

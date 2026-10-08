@@ -3,7 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LawChain · 纳西妲的法律问答</title>
+    <title>LawChain · 律衡</title>
+    <!-- 浏览器标签页图标（就是那个能关闭的标签上的小图） -->
+    <link rel="icon" type="image/jpeg" href="/static/data/网页头.jpg">
+    <link rel="shortcut icon" type="image/jpeg" href="/static/data/网页头.jpg">
+    <link rel="apple-touch-icon" href="/static/data/网页头.jpg">
     <style>
         :root {
             --grass-900: #1f4d33;
@@ -77,12 +81,13 @@
         .app {
             position: relative;
             z-index: 2;
-            width: min(1080px, 100%);
-            height: min(880px, calc(100vh - 44px));
+            /* 加宽：原来 min(1080px, 100%)，现在跟随视口宽度 */
+            width: min(90vw, 1320px);
+            height: min(92vh, 940px);
             background: rgba(255, 255, 255, .82);
-            backdrop-filter: blur(14px);
+            backdrop-filter: blur(16px);
             border: 2px solid rgba(217, 178, 106, .55);
-            border-radius: 28px;
+            border-radius: 26px;
             box-shadow: var(--shadow-card);
             display: flex;
             flex-direction: column;
@@ -210,14 +215,12 @@
         }
         .msg.user .msg-avatar {
             border-color: var(--grass-300);
-            display: flex; align-items: center; justify-content: center;
-            background: linear-gradient(145deg, var(--grass-100), #ffffff);
-            font-size: 19px;
+            background: #fff;
         }
 
         /* 头像图片：铺满容器并按比例裁切 */
         .avatar-img { width: 100%; height: 100%; object-fit: cover; display: block; }
-        .msg.user .avatar-img { display: none; }
+        /* 用户头像也是图片，因此不再隐藏（原版用 emoji，这里改为图片） */
         .welcome .welcome-portrait .avatar-img { object-position: 50% 22%; }
 
         /* 宽度策略：
@@ -227,7 +230,7 @@
            改为 width: 100% 占满 .msg-body，由 .msg-body 的 max-width 统一约束。 */
         .msg-body {
             width: fit-content;
-            max-width: min(74%, 660px);
+            max-width: min(72%, 780px);
             min-width: 0;            /* 允许 flex 收缩，避免撑破容器 */
             display: flex;
             flex-direction: column;
@@ -515,12 +518,9 @@
 <!-- 主界面 -->
 <main class="app">
     <header class="topbar">
-        <div class="brand-avatar">
-            <img class="avatar-img" src="/static/data/nahida.jpg" alt="纳西妲">
-        </div>
         <div class="brand-text">
-            <h1 class="brand-title"><span class="clover">🌿</span>LawChain · 纳西妲的法律问答</h1>
-            <p class="brand-sub">检索链：Redis 缓存 → MySQL 关键词（BM25）→ Milvus 向量库 → 大模型生成</p>
+            <h1 class="brand-title"><span class="clover">🌿</span>LawChain · 律衡</h1>
+            <p class="brand-sub">LEGAL RAG ASSISTANT · 以法为衡</p>
         </div>
         <div class="status-chip" id="statusChip" data-state="connecting">
             <span class="status-dot"></span>
@@ -532,9 +532,9 @@
     <section class="chat-area" id="chatArea" aria-live="polite">
         <div class="welcome" id="welcome">
             <div class="welcome-portrait">
-                <img class="avatar-img" src="/static/data/nahida.jpg" alt="纳西妲">
+                <img class="avatar-img" src="/static/data/头像.jpg" alt="律衡">
             </div>
-            <h2>你好呀，我是纳西妲 🌱</h2>
+            <h2>你好呀，我是律衡 🌱</h2>
             <p class="welcome-sub">
                 把法律问题交给我吧，我会先去缓存里找找看，<br>
                 再去法典与案例中检索，最后为你整理成一段好懂的答案。
@@ -579,7 +579,8 @@
     var WATCHDOG_TIMEOUT = 120000;    // 120s 收不到任何服务端帧则判定假死
     var MAX_RECONNECT_DELAY = 15000;
     var PENDING_MAX = 20;
-    var AVATAR_SRC = '/static/data/nahida.jpg';
+    var AVATAR_SRC = '/static/data/头像.jpg';
+    var USER_AVATAR_SRC = '/static/data/用户头像.jpg';
 
     /* ============================================================
      * DOM
@@ -614,21 +615,19 @@
     function makeAvatar(role) {
         var box = document.createElement('div');
         box.className = 'msg-avatar';
-        if (role === 'user') {
-            box.textContent = '🧑';
-            return box;
-        }
+
+        var isUser = (role === 'user');
         var img = document.createElement('img');
         img.className = 'avatar-img';
-        img.src = AVATAR_SRC;
-        img.alt = '纳西妲';
-        // 图片加载失败也不影响布局：退化为一个圆点
+        img.src = isUser ? USER_AVATAR_SRC : AVATAR_SRC;
+        img.alt = isUser ? '我' : '律衡';
+        // 图片加载失败也不影响布局：退化为一个字符
         img.onerror = function () {
             img.style.display = 'none';
-            box.textContent = '🌿';
+            box.textContent = isUser ? '🧑' : '🌿';
             box.style.display = 'grid';
             box.style.placeItems = 'center';
-            box.style.fontSize = '20px';
+            box.style.fontSize = isUser ? '19px' : '20px';
         };
         box.appendChild(img);
         return box;
@@ -769,6 +768,10 @@
      * 流式期间用纯文本（pre-wrap，绝不竖排）；结束时一次性渲染 markdown
      * ============================================================ */
     var S = { open: false, wrap: null, body: null, bubble: null, text: null, raw: '' };
+
+    /* 会话 ID：由服务端在 WebSocket 连接建立时下发，提问时回传。
+       刷新页面会换新连接 → 换新会话（会话边界 = 一条连接）。 */
+    var sessionId = '';
 
     function streamBegin() {
         dropWelcome();
@@ -925,6 +928,20 @@
     /* 处理一帧服务端消息 */
     function onFrame(payload) {
         switch (payload.type) {
+            case 'session':
+                // 服务端在连接建立时下发会话 ID，之后每次提问都要回传它
+                sessionId = payload.session_id || '';
+                break;
+
+            case 'stage':
+                // 处理阶段动态提示（正在理解您的问题… → 判断类型 → 检索 → 生成）
+                // 若首个 token 还没来，就只更新等待气泡的文案；已经开流则忽略，
+                // 避免把答案气泡的提示又改回去。
+                if (!S.open && payload.text) {
+                    setTypingText(payload.text);
+                }
+                break;
+
             case 'ping':
                 send({ type: 'pong' });
                 break;
@@ -1057,9 +1074,9 @@
         }
 
         // 先给出阶段提示：命中缓存/关键词会很快被 answer 帧替换，
-        // 未命中则要经历 检索分类 → 问题改写 → 向量检索+重排 → LLM 生成，可能数秒
-        showTyping('正在检索法规与案例…');
-        send({ type: 'question', text: text });
+        // 未命中则要经历 指代消解 → 检索分类 → 问题改写 → 向量检索+重排 → LLM 生成，可能数秒
+        showTyping('正在理解您的问题…');
+        send({ type: 'question', text: text, session_id: sessionId });
     }
 
     /* ============================================================
